@@ -1,0 +1,7 @@
+.DS_Store
+build/
+DerivedData/
+# 由 project.yml 生成
+Islander.xcodeproj/
+Islander/App/Info.plist
+xcuserdata/

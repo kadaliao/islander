@@ -1,0 +1,148 @@
+{
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "srgb:0.30196,0.72549,0.98039,1.00000",
+          "srgb:0.78039,0.93725,1.00000,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 0.64
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.03922,0.06275,0.17647,1.00000",
+          "srgb:0.13333,0.21961,0.45098,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 0.64
+          }
+        }
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "island",
+      "layers": [
+        {
+          "image-name": "dots.svg",
+          "name": "dots"
+        },
+        {
+          "image-name": "island.svg",
+          "name": "island"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.15
+      },
+      "specular": true
+    },
+    {
+      "name": "palm",
+      "layers": [
+        {
+          "image-name": "coconuts.svg",
+          "name": "coconuts"
+        },
+        {
+          "image-name": "front-leaves.svg",
+          "name": "front-leaves"
+        },
+        {
+          "image-name": "back-leaves.svg",
+          "name": "back-leaves"
+        },
+        {
+          "image-name": "trunk.svg",
+          "name": "trunk"
+        }
+      ],
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.4
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.2
+      },
+      "specular": true
+    },
+    {
+      "name": "sea",
+      "layers": [
+        {
+          "image-name": "sea-deep.svg",
+          "name": "sea-deep"
+        },
+        {
+          "image-name": "sea.svg",
+          "name": "sea"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.3
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.35
+      },
+      "specular": true
+    },
+    {
+      "name": "sun",
+      "layers": [
+        {
+          "image-name": "sun.svg",
+          "name": "sun",
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.96078,0.94118,0.84706,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.3
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.3
+      },
+      "specular": true
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}
