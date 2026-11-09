@@ -35,7 +35,11 @@
 ## 安装
 
 从 [Releases](https://github.com/kadaliao/islander/releases/latest) 下载 `Islander-<版本>.dmg`，
-打开后把岛民拖进「应用程序」。已用 Developer ID 签名并公证。
+打开后把岛民拖进「应用程序」。已用 Developer ID 签名并公证。也可以用 Homebrew 安装：
+
+```sh
+brew install --cask kadaliao/tap/islander
+```
 
 需要 macOS 14 或更新，在 macOS 26 上开发和测试。没有刘海的 Mac 上，岛民会在菜单栏正中间画一个虚拟刘海。
 

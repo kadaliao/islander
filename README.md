@@ -47,6 +47,11 @@ The interface is in Simplified Chinese.
 Download `Islander-<version>.dmg` from
 [Releases](https://github.com/kadaliao/islander/releases/latest), open it, and
 drag Islander into Applications. It is signed with a Developer ID and notarized.
+Or install it with Homebrew:
+
+```sh
+brew install --cask kadaliao/tap/islander
+```
 
 Islander requires macOS 14 or later and is developed and tested on macOS 26.
 On a Mac without a notch it draws a virtual notch in the middle of the menu bar.
