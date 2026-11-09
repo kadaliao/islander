@@ -18,6 +18,10 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/kadaliao/islander"></a>
 </p>
 
+<p align="center">
+  <img src="docs/images/demo.gif" width="880" alt="Point at the notch and the island drops down with your hidden icons; click one to open its menu">
+</p>
+
 ---
 
 A notched MacBook has little room for menu bar icons, and the ones that don't fit

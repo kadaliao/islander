@@ -18,6 +18,10 @@
   <a href="LICENSE"><img alt="许可证" src="https://img.shields.io/github/license/kadaliao/islander"></a>
 </p>
 
+<p align="center">
+  <img src="docs/images/demo.gif" width="880" alt="鼠标移到刘海上，岛带着藏起来的图标展开；点一下图标，菜单就在它下方打开">
+</p>
+
 ---
 
 带刘海的 MacBook 菜单栏放不下几个图标，放不下的会悄悄躲到刘海后面。岛民把不常用的图标藏起来，
