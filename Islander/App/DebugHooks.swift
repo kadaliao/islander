@@ -21,6 +21,8 @@ private let log = Logger(subsystem: "com.kadaliao.islander", category: "debug")
 ///     com.kadaliao.islander.debug.chain     打印每个图标认的是哪个窗口（记着的 / 现在认的 / 合起来认的）
 ///     com.kadaliao.islander.debug.capture   object = 窗口编号：截一张，打印耗时和不透明像素数
 ///     com.kadaliao.islander.debug.slow      object = 倍数：动画慢放（会存进手感参数，用完改回 1）
+///     com.kadaliao.islander.debug.update    像后台那样检查更新（开着自动安装时会下载）；object = "install" 时接着装上并重新打开。
+///                                           只有 Developer ID 签名的构建会更新
 enum DebugHooks {
     @MainActor
     static func install() {
@@ -144,6 +146,13 @@ enum DebugHooks {
         }
         observe("showall") { value in
             HiddenItemsStore.shared.showAllItems = value == "on"
+        }
+        observe("update") { value in
+            Task {
+                await Updater.shared.check(userInitiated: false)
+                log.notice("调试更新：\(String(describing: Updater.shared.state), privacy: .public)")
+                if value == "install" { await Updater.shared.update() }
+            }
         }
         observe("slow") { value in
             TuningStore.shared.tuning.slowMotion = Double(value) ?? 1

@@ -192,9 +192,94 @@ private struct GeneralPane: View {
                 Text("藏起来的图标不占菜单栏，鼠标移到刘海上时出现在灵动岛里。点菜单栏上的岛民图标也能切换。")
                     .foregroundStyle(.secondary)
             }
+
+            UpdateSection()
         }
         .formStyle(.grouped)
         .onAppear { settings.refreshLaunchAtLogin() }
+    }
+}
+
+private struct UpdateSection: View {
+    @Bindable private var updater = Updater.shared
+
+    var body: some View {
+        Section {
+            Group {
+                Toggle("自动检查更新", isOn: $updater.checksAutomatically)
+                Toggle("自动下载并安装", isOn: $updater.installsAutomatically)
+                    .disabled(!updater.checksAutomatically)
+            }
+            .disabled(!updater.enabled)
+
+            if let r = updater.release {
+                LabeledContent {
+                    HStack {
+                        Button("更新内容") { NSWorkspace.shared.open(r.page) }
+                            .buttonStyle(.link)
+                        if updater.isWorking {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button(actionTitle) { Task { await updater.update() } }
+                                .buttonStyle(.borderedProminent)
+                        }
+                    }
+                } label: {
+                    Text("新版本 \(r.version.description)")
+                    Text(status)
+                }
+                if let problem = updater.problem {
+                    Text(problem)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            LabeledContent {
+                HStack {
+                    if updater.checking { ProgressView().controlSize(.small) }
+                    Button("立即检查") { Task { await updater.check(userInitiated: true) } }
+                        .disabled(updater.isWorking)
+                }
+            } label: {
+                Text("当前版本 \(updater.current.description)")
+                Text("上次检查：\(lastChecked)")
+            }
+        } header: {
+            Text("更新")
+        } footer: {
+            Text(footer).foregroundStyle(.secondary)
+        }
+    }
+
+    private var status: String {
+        switch updater.state {
+        case .available: updater.blocker == nil ? "还没下载" : "这里没法自己更新"
+        case .downloading: "正在下载…"
+        case .ready: "已下载，重新打开即更新"
+        case .installing: "正在安装…"
+        case .installed: "已装好，重新打开就能用"
+        case .idle: ""
+        }
+    }
+
+    private var actionTitle: String {
+        if updater.blocker != nil { return "打开下载页" }
+        return switch updater.state {
+        case .installed: "重新打开"
+        default: "更新并重新打开"
+        }
+    }
+
+    private var footer: String {
+        guard updater.enabled else { return "只有从 GitHub Releases 下载的正式版本会自己更新。" }
+        return "大约每天检查一次 GitHub Releases。新版本在后台下载，签名必须和这个版本出自同一个开发者、并经过 Apple 公证才会安装。"
+            + "安装在你离开电脑几分钟、岛收着、设置窗口关着时进行，岛民一两秒后自己重新打开；也会在你退出岛民时装上。"
+    }
+
+    private var lastChecked: String {
+        guard let d = updater.lastCheck else { return "从未" }
+        return d.formatted(.relative(presentation: .named).locale(Locale(identifier: "zh_Hans")))
     }
 }
 
@@ -362,6 +447,8 @@ private struct AboutPane: View {
             Text(version)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
+            Button("检查更新…") { Task { await Updater.shared.check(userInitiated: true) } }
+                .disabled(Updater.shared.isWorking)
             Text("把菜单栏图标藏进刘海，鼠标碰到刘海时在灵动岛里出现。")
                 .padding(.top, 6)
             Text(Bundle.main.infoDictionary?["NSHumanReadableCopyright"] as? String ?? "")

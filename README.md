@@ -60,6 +60,10 @@ brew install --cask kadaliao/tap/islander
 Islander requires macOS 14 or later and is developed and tested on macOS 26.
 On a Mac without a notch it draws a virtual notch in the middle of the menu bar.
 
+Islander checks GitHub for a new version about once a day, downloads it in the
+background, and installs it while you're away from the Mac. You can turn this
+off in Settings › General.
+
 ### Permissions
 
 - **Accessibility**: to tell which app each menu bar icon belongs to, open

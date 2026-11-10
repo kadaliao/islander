@@ -9,6 +9,7 @@ enum MainMenu {
 
         let app = submenu(of: main, title: "岛民")
         app.addItem(item("关于岛民", #selector(Actions.about), target: Actions.shared))
+        app.addItem(item("检查更新…", #selector(Actions.checkForUpdates), target: Actions.shared))
         app.addItem(.separator())
         app.addItem(item("设置…", #selector(Actions.settings), key: ",", target: Actions.shared))
         app.addItem(.separator())
@@ -58,5 +59,6 @@ enum MainMenu {
         static let shared = Actions()
         @objc func about() { SettingsController.shared.show(.about) }
         @objc func settings() { SettingsController.shared.show() }
+        @objc func checkForUpdates() { Task { await Updater.shared.check(userInitiated: true) } }
     }
 }

@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ScreenManager.shared.start()
         HiddenItemsStore.shared.start()
         SettingsController.shared.showIfNeeded()
+        Updater.shared.start()
         #if DEBUG
         DebugHooks.install()
         #endif
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         MenuBarHider.shared.prepareForTermination()
+        Updater.shared.installOnQuit()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
