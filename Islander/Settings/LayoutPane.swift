@@ -13,6 +13,9 @@ struct LayoutPane: View {
 
     @State private var draggingID: String?
     @State private var dropTarget: DropTarget?
+    /// 正在拖动时的落点。松手以后 SwiftUI 还会补发一次"经过"、又不再发"离开"，
+    /// 只看 dropTarget 的话插入标记和蓝框会一直留着
+    private var activeDropTarget: DropTarget? { draggingID == nil ? nil : dropTarget }
     /// 每个图标的实际宽度，判断落点在它左半边还是右半边
     @State private var chipWidths: [String: CGFloat] = [:]
 
@@ -81,11 +84,17 @@ struct LayoutPane: View {
                           caption: "菜单栏和岛上都不显示。要用时按住 ⌥ 再把鼠标移到刘海上。",
                           empty: "把不想看到的图标拖到这里", items: zones.alwaysHidden, zones: zones)
                 }
-
-                statusBar
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // 移动进度和失败原因固定在底部：放在内容最后要往下滚才看得到，失败了像是没反应
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            statusBar
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+                .background(.bar)
+                .overlay(alignment: .top) { Divider() }
         }
         .onAppear { mover.lastError = nil }
     }
@@ -94,7 +103,7 @@ struct LayoutPane: View {
 
     private func shelf(_ section: Zone, title: String, symbol: String, caption: String, empty: String,
                        items: [HiddenItemsStore.Item], zones: Zones) -> some View {
-        let targeted = dropTarget?.section == section
+        let targeted = activeDropTarget?.section == section
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: symbol).foregroundStyle(.secondary)
@@ -113,6 +122,7 @@ struct LayoutPane: View {
                     )
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { chipWidths[item.id] = $0 }
                     .draggable(item.source.isMovable) {
+                        dropTarget = nil
                         draggingID = item.id
                         return NSItemProvider(object: item.id as NSString)
                     }
@@ -156,7 +166,7 @@ struct LayoutPane: View {
 
     /// 这个图标的哪一侧要画插入标记
     private func insertion(for id: String, nextID: String?, section: Zone) -> HorizontalEdge? {
-        guard let dropTarget, dropTarget.section == section else { return nil }
+        guard let dropTarget = activeDropTarget, dropTarget.section == section else { return nil }
         if dropTarget.beforeID == id { return .leading }
         if dropTarget.beforeID == nil, nextID == nil { return .trailing }
         return nil
@@ -310,7 +320,10 @@ private struct ChipDropDelegate: DropDelegate {
     func validateDrop(info: DropInfo) -> Bool { canDrop }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        target = destination(info)
+        guard canDrop else { return DropProposal(operation: .forbidden) }
+        // 指针每动一下都会调到这里：落点没变就不写，免得整页跟着重画
+        let new = destination(info)
+        if target != new { target = new }
         return DropProposal(operation: .move)
     }
 
@@ -337,8 +350,10 @@ private struct ShelfDropDelegate: DropDelegate {
     func validateDrop(info: DropInfo) -> Bool { canDrop }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard canDrop else { return DropProposal(operation: .forbidden) }
         // 只有指针在空白处时才会走到这里（在图标上方时由图标自己的代理接管）
-        target = .init(section: section, beforeID: nil)
+        let new = LayoutPane.DropTarget(section: section, beforeID: nil)
+        if target != new { target = new }
         return DropProposal(operation: .move)
     }
 

@@ -1,5 +1,8 @@
 import AppKit
 import ApplicationServices
+import os
+
+private let log = Logger(subsystem: "com.kadaliao.islander", category: "scanner")
 
 /// 在后台线程用辅助功能接口枚举菜单栏图标。
 ///
@@ -135,6 +138,22 @@ final class MenuBarScanner: @unchecked Sendable {
         return rows.count <= 1
     }
 
+    /// 每块屏幕的顶边（CG 全局坐标，原点在主屏左上），每块屏幕各有一行菜单栏。CG 接口在后台线程也能用
+    private static func menuBarRowTops() -> [CGFloat] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return [] }
+        return displays.prefix(Int(count)).map { CGDisplayBounds($0).minY }
+    }
+
+    /// 图标在某一行菜单栏上：横向不管（被挤出屏幕的图标 x 在很远的地方），纵向要贴着某块屏幕的顶边。
+    /// 前台是全屏 App 时菜单栏自动收起，图标停在屏幕顶边上方，也算
+    private static func isOnMenuBarRow(_ frame: CGRect, rowTops: [CGFloat]) -> Bool {
+        guard !rowTops.isEmpty else { return true }
+        return rowTops.contains { abs(frame.midY - $0) <= 50 }
+    }
+
     private func scanOnce(extra: [AppInfo], own: AppInfo, isFull: Bool, start: Date) -> Result {
         var apps = knownApps
         apps[own.pid] = own
@@ -149,6 +168,7 @@ final class MenuBarScanner: @unchecked Sendable {
         var toggle: CGRect?
         var found: [(app: AppInfo, index: Int, frame: CGRect, identifier: String?, label: String?,
                      element: AXUIElement)] = []
+        let rowTops = Self.menuBarRowTops()
 
         for app in apps.values {
             let appElement = AXUIElementCreateApplication(app.pid)
@@ -175,6 +195,12 @@ final class MenuBarScanner: @unchecked Sendable {
                     continue
                 }
 
+                // 有的 App 的图标其实没在菜单栏上（实测 flomo 报告在屏幕左下角），却照样列出来。
+                // 留着它，岛民就永远对不上菜单栏的窗口，移动图标时只能放弃
+                guard Self.isOnMenuBarRow(frame, rowTops: rowTops) else {
+                    log.debug("不在菜单栏上，忽略：\(app.name, privacy: .public) #\(index) \(String(describing: frame), privacy: .public)")
+                    continue
+                }
                 found.append((app, index, frame, identifier, AX.string(child, kAXDescriptionAttribute), child))
             }
         }
