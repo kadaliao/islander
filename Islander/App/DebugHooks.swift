@@ -10,7 +10,7 @@ private let log = Logger(subsystem: "com.kadaliao.islander", category: "debug")
 ///     com.kadaliao.islander.debug.open      object = 图标 id 的一部分（如 "Alfred"）：模拟点击岛上的这个图标
 ///     com.kadaliao.islander.debug.style     object = "light" / "dark" / "auto"：强制配色
 ///     com.kadaliao.islander.debug.pin       object = "on" / "off"：展开并锁定岛
-///     com.kadaliao.islander.debug.snapshot  object = PNG 路径：把岛所在区域截图存下来
+///     com.kadaliao.islander.debug.snapshot  object = PNG 路径[@高度]：把岛所在区域截图存下来
 ///     com.kadaliao.islander.debug.settings  object = 页面名（general / layout / island / permissions / about）：打开设置
 ///     com.kadaliao.islander.debug.window    object = PNG 路径：把设置窗口截图存下来
 ///     com.kadaliao.islander.debug.move      object = "图标>always / hidden / visible[@放在它前面的图标]"：移动菜单栏图标
@@ -158,10 +158,13 @@ enum DebugHooks {
             let visible = items.filter { !$0.isHidden }.map(\.source.appName).joined(separator: " ")
             log.notice("布局 永远隐藏：\(always, privacy: .public) ｜ 岛上：\(hidden, privacy: .public) ｜ 菜单栏：\(visible, privacy: .public)")
         }
-        observe("snapshot") { path in
+        observe("snapshot") { value in
             guard let geometry = ScreenManager.shared.controllers.first?.geometry else { return }
-            // 岛周围一块区域（CG 坐标）
-            let area = CGRect(x: geometry.notchRect.midX - 400, y: geometry.menuBarRowTop, width: 800, height: 160)
+            // 岛周围一块区域（CG 坐标）；"路径@高度" 可以截得更高（看岛下面的弹窗）
+            let parts = value.split(separator: "@", maxSplits: 1).map(String.init)
+            let path = parts.first ?? value
+            let height = parts.count > 1 ? CGFloat(Double(parts[1]) ?? 160) : 160
+            let area = CGRect(x: geometry.notchRect.midX - 400, y: geometry.menuBarRowTop, width: 800, height: height)
             DispatchQueue.global().async {
                 guard let image = captureScreen(area) else { return }
                 save(image, to: path)

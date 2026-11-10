@@ -25,6 +25,7 @@ final class MenuBarHider: NSObject {
         static let toggle = "IslanderToggle"
         static let separator = "IslanderSeparator"
         static let alwaysHidden = "IslanderAlwaysHiddenSeparator"
+        static let collector = "IslanderCollector"
     }
     private static let hiddenKey = "menuBarItemsHidden"
 
@@ -54,6 +55,10 @@ final class MenuBarHider: NSObject {
     @ObservationIgnored private var separatorItem: NSStatusItem?
     @ObservationIgnored private var alwaysHiddenItem: NSStatusItem?
     @ObservationIgnored private var contextMenu: NSMenu?
+    @ObservationIgnored private var ignoresToggleClicksUntil = Date.distantPast
+    @ObservationIgnored private var collectorItem: NSStatusItem?
+    /// 上一次由我们写下的收纳符首选位置
+    @ObservationIgnored private var collectorPosition: CGFloat?
 
     private override init() {}
 
@@ -162,13 +167,14 @@ final class MenuBarHider: NSObject {
         log.info("图标已排好：分隔符 / 开关 = \(String(describing: frames), privacy: .public)")
 
         // 分隔符落到了屏幕外（被其他隐藏工具的区域吞掉等），用户就找不到它了：挪到开关左边
+        // 只看水平方向：前台是全屏 App 时菜单栏自动隐藏，图标停在屏幕顶边上方，那不算屏幕外
         if let frame = frames?.first,
-           !NSScreen.screens.contains(where: { $0.frame.insetBy(dx: -1, dy: -1).contains(frame) }) {
+           !NSScreen.screens.contains(where: { screen in
+               frame.minX >= screen.frame.minX - 1 && frame.maxX <= screen.frame.maxX + 1
+                   && frame.minY >= screen.frame.minY && frame.minY <= screen.frame.maxY + 1
+           }) {
             log.notice("分隔符在屏幕外 \(String(describing: frame), privacy: .public)，挪到开关左边")
-            if let separatorItem { NSStatusBar.system.removeStatusItem(separatorItem) }
-            UserDefaults.standard.set(1.0, forKey: Self.preferredPositionKey(Name.separator))
-            createSeparator()
-            applyLengths()
+            moveSeparator(to: positionLeftOfToggle() ?? 1)
         }
 
         // 永远隐藏分隔符必须在分隔符左边，否则它会把该藏到岛上的、甚至常显的图标一起挤出屏幕：放回最左边
@@ -180,6 +186,8 @@ final class MenuBarHider: NSObject {
             applyLengths()
         }
 
+        createCollectorIfNeeded()
+        applyLengths()
         let restoreHidden = UserDefaults.standard.bool(forKey: Self.hiddenKey)
         if restoreHidden {
             setHidden(true, interactive: false)
@@ -233,11 +241,90 @@ final class MenuBarHider: NSObject {
     func prepareForTermination() {
         separatorItem?.length = Self.separatorLength
         alwaysHiddenItem?.length = Self.separatorLength
+        collectorItem?.length = Self.separatorLength
     }
 
     /// 分隔符在菜单栏里的真实位置（AppKit 坐标），阶段 3 用来区分哪些图标被隐藏
     var separatorFrame: CGRect? {
         Self.settledFrames([separatorItem])?.first
+    }
+
+    // MARK: - 显示全部图标
+
+    /// "在岛上显示全部图标"：菜单栏上的图标也全收到岛上，菜单栏上不再留一份
+    /// （留在菜单栏上的图标，从岛上点开时弹窗会先在真实图标下出现、再跳到岛下面）。
+    ///
+    /// 不动用户的分隔符（系统记的首选位置数值不可靠，挪过去就放不回原处），而是在开关左边另放一个"收纳符"：
+    /// 平时不存在；打开这个模式并且图标藏着的时候伸到一万 pt 长，把分隔符和开关之间的图标也挤出屏幕。
+    /// 这些图标仍然算"菜单栏上的"（在分隔符右边），关掉模式它们原样回来。
+    var collectsAll = false {
+        didSet {
+            guard collectsAll != oldValue, toggleItem != nil else { return }
+            if isReady { createCollectorIfNeeded() }
+            applyLengths()
+            onLayoutChange?()
+        }
+    }
+
+    /// 收纳符没落在紧挨开关左边的位置：往左（正数）或往右（负数）挪一点
+    func nudgeCollector(by delta: CGFloat) {
+        guard let collectorItem else { return }
+        let key = Self.preferredPositionKey(Name.collector)
+        let position = collectorPosition ?? CGFloat(UserDefaults.standard.double(forKey: key))
+        NSStatusBar.system.removeStatusItem(collectorItem)
+        createCollector(at: max(position + delta, 1))
+        applyLengths()
+    }
+
+    /// 以前建过（系统记着它的位置）就接着用，没建过的放在开关左边。要等开关排好位置才能算
+    private func createCollectorIfNeeded() {
+        guard collectsAll, collectorItem == nil else { return }
+        let known = UserDefaults.standard.object(forKey: Self.preferredPositionKey(Name.collector)) != nil
+        createCollector(at: known ? nil : positionLeftOfToggle())
+    }
+
+    private func createCollector(at position: CGFloat?) {
+        if let position {
+            UserDefaults.standard.set(position, forKey: Self.preferredPositionKey(Name.collector))
+            collectorPosition = position
+        }
+        let collector = NSStatusBar.system.statusItem(withLength: Self.separatorLength)
+        collector.autosaveName = Name.collector
+        if let button = collector.button {
+            (button.cell as? NSButtonCell)?.highlightsBy = []
+            button.setAccessibilityIdentifier(MenuBarScanner.collectorIdentifier)
+        }
+        collectorItem = collector
+    }
+
+    /// 分隔符换位置：系统没有移动状态栏图标的接口，删掉、写好首选位置再建一个
+    private func moveSeparator(to position: CGFloat) {
+        if let separatorItem { NSStatusBar.system.removeStatusItem(separatorItem) }
+        UserDefaults.standard.set(position, forKey: Self.preferredPositionKey(Name.separator))
+        createSeparator()
+        applyLengths()
+        onLayoutChange?()
+    }
+
+    /// 紧挨着开关左边的首选位置（和 leftmostVisiblePosition 同一个算法：比开关的左边缘稍微往右一点）
+    private func positionLeftOfToggle() -> CGFloat? {
+        guard let frame = Self.settledFrames([toggleItem])?.first,
+              let screen = NSScreen.screens.first(where: { $0.frame.minX <= frame.midX && frame.midX <= $0.frame.maxX })
+        else { return nil }
+        return max(screen.frame.maxX - frame.minX - 12, 1)
+    }
+
+    /// 开关图标在某一行菜单栏（顶边 CG y 坐标）里的窗口。多屏时每一行各有一个
+    func toggleWindow(inRowTop top: CGFloat) -> StatusBarRows.Window? {
+        guard let frame = Self.settledFrames([toggleItem])?.first, let primary = NSScreen.screens.first else { return nil }
+        let center = CGPoint(x: frame.midX, y: primary.frame.maxY - frame.midY)
+        let rows = StatusBarRows.current()
+        return rows.window(containing: center).flatMap { rows.counterpart(of: $0, inRowTop: top) }
+    }
+
+    /// 接下来一小段时间不响应对开关的点击（岛民自己为了切换活动菜单栏往它身上发了一次点击）
+    func ignoreToggleClicks(for duration: TimeInterval) {
+        ignoresToggleClicksUntil = Date().addingTimeInterval(duration)
     }
 
     // MARK: - 私有
@@ -253,6 +340,9 @@ final class MenuBarHider: NSObject {
         // 只在全部露出（调整布局等）时画出来；平时就算缩成细线也不显示，菜单栏上不多一个记号
         let revealsAll = isTemporarilyRevealed && temporarilyRevealsAlwaysHidden
         alwaysHiddenItem?.button?.image = revealsAll ? Self.alwaysHiddenImage : nil
+        // 收纳符：只在"显示全部图标"时存在；图标藏着时伸长，把分隔符右边的图标也挤出屏幕
+        collectorItem?.isVisible = collectsAll
+        collectorItem?.length = collectsAll && !showsHidden ? Self.hidingLength : Self.separatorLength
 
         let hidden = isHidden
         let symbol = hidden ? "capsule.fill" : "capsule"
@@ -270,7 +360,7 @@ final class MenuBarHider: NSObject {
     }
 
     @objc private func toggleClicked() {
-        guard let event = NSApp.currentEvent else { return }
+        guard Date() >= ignoresToggleClicksUntil, let event = NSApp.currentEvent else { return }
         let wantsMenu = event.type == .rightMouseUp
             || event.modifierFlags.contains(.control)
             || event.modifierFlags.contains(.option)

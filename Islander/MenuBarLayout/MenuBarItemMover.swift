@@ -372,6 +372,7 @@ struct MenuBarSnapshot {
     static let separatorID = "islander|separator"
     static let alwaysHiddenSeparatorID = "islander|always-hidden-separator"
     static let toggleID = "islander|toggle"
+    static let collectorID = "islander|collector"
 
     let entries: [Entry]
     let separator: CGRect
@@ -403,8 +404,11 @@ struct MenuBarSnapshot {
             (Self.alwaysHiddenSeparatorID, "IslanderAlwaysHiddenSeparator", result.alwaysHiddenSeparator),
             (Self.separatorID, "IslanderSeparator", separatorAX),
             (Self.toggleID, "IslanderToggle", toggleAX),
+            (Self.collectorID, "IslanderCollector", result.collector),
         ]
-        let wide = chain.filter { $0.frame.width > 1000 }
+        // 伸长的窗口从左到右：永远隐藏分隔符、分隔符、收纳符（"显示全部图标"时才有）
+        var wide = chain.filter { $0.frame.width > 1000 }
+        let wideCollector = (result.collector?.width ?? 0) > 1000 ? wide.popLast() : nil
         for (id, name, ax) in own {
             guard let ax else { continue }
             let window: StatusBarRows.Window? = {
@@ -412,6 +416,7 @@ struct MenuBarSnapshot {
                 if let named = chain.first(where: { $0.name == name }) { return named }
                 // 没有屏幕录制权限读不到标题：伸长的分隔符是链上最宽的两个窗口，左边那个是永远隐藏分隔符
                 if ax.width > 1000 {
+                    if id == Self.collectorID { return wideCollector }
                     if id == Self.separatorID { return wide.last }
                     if id == Self.alwaysHiddenSeparatorID, wide.count > 1 { return wide.first }
                 }
@@ -419,7 +424,7 @@ struct MenuBarSnapshot {
                     .min { abs($0.frame.minX - ax.minX + 7) < abs($1.frame.minX - ax.minX + 7) }
             }()
             guard let window, labels[window.id] == nil else {
-                if id == Self.alwaysHiddenSeparatorID { continue }
+                if id == Self.alwaysHiddenSeparatorID || id == Self.collectorID { continue }
                 log.debug("对不上窗口：\(id, privacy: .public)")
                 return nil
             }
@@ -577,8 +582,10 @@ struct MenuBarSnapshot {
             case .hidden:
                 return separatorIndex
             case .visible:
-                // 放在岛民开关左边；开关不在这一区时，放在系统固定的图标（控制中心、时钟）左边
-                return others.indices.first { $0 > separatorIndex && others[$0].id == Self.toggleID }
+                // 放在岛民开关（有收纳符时是收纳符）左边；开关不在这一区时，放在系统固定的图标（控制中心、时钟）左边
+                return others.indices.first {
+                    $0 > separatorIndex && (others[$0].id == Self.toggleID || others[$0].id == Self.collectorID)
+                }
                     ?? others.indices.first { $0 > separatorIndex && !others[$0].isMovable }
             }
         }()

@@ -29,6 +29,8 @@ final class MenuBarScanner: @unchecked Sendable {
         let separator: CGRect?
         /// "永远隐藏"分隔符的位置，在分隔符更左边；它左边的图标连岛上也不显示
         let alwaysHiddenSeparator: CGRect?
+        /// "显示全部图标"时开关左边的收纳符，没有这个模式时为 nil
+        var collector: CGRect? = nil
         /// 岛民开关的位置，用来探测每块屏幕菜单栏的深浅
         let toggle: CGRect?
         /// 扫描结束时的菜单栏窗口快照
@@ -51,6 +53,7 @@ final class MenuBarScanner: @unchecked Sendable {
 
     static let separatorIdentifier = "IslanderSeparator"
     static let alwaysHiddenSeparatorIdentifier = "IslanderAlwaysHiddenSeparator"
+    static let collectorIdentifier = "IslanderCollector"
     static let toggleIdentifier = "IslanderToggle"
 
     private let queue = DispatchQueue(label: "com.kadaliao.islander.scanner", qos: .userInitiated)
@@ -142,6 +145,7 @@ final class MenuBarScanner: @unchecked Sendable {
         var usedIDs = Set<String>()
         var separator: CGRect?
         var alwaysHiddenSeparator: CGRect?
+        var collector: CGRect?
         var toggle: CGRect?
         var found: [(app: AppInfo, index: Int, frame: CGRect, identifier: String?, label: String?,
                      element: AXUIElement)] = []
@@ -166,6 +170,7 @@ final class MenuBarScanner: @unchecked Sendable {
                 if app.pid == own.pid {
                     if identifier == Self.separatorIdentifier { separator = frame }
                     if identifier == Self.alwaysHiddenSeparatorIdentifier { alwaysHiddenSeparator = frame }
+                    if identifier == Self.collectorIdentifier { collector = frame }
                     if identifier == Self.toggleIdentifier { toggle = frame }
                     continue
                 }
@@ -198,6 +203,7 @@ final class MenuBarScanner: @unchecked Sendable {
         items = Self.removingDuplicateWindows(items)
         items.sort { $0.frame.minX < $1.frame.minX }
         return Result(items: items, separator: separator, alwaysHiddenSeparator: alwaysHiddenSeparator,
-                      toggle: toggle, rows: rows, isFull: isFull, duration: Date().timeIntervalSince(start))
+                      collector: collector, toggle: toggle, rows: rows, isFull: isFull,
+                      duration: Date().timeIntervalSince(start))
     }
 }

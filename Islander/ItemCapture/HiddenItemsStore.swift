@@ -132,11 +132,13 @@ final class HiddenItemsStore {
     /// 调试：用占位图标代替真实内容
     var previewPlaceholders = false
 
-    /// 岛上显示菜单栏上的全部图标，而不只是被隐藏的
+    /// 岛上显示菜单栏上的全部图标，而不只是被隐藏的。打开时菜单栏上能挪的图标也全收到岛上（MenuBarHider 的收纳符）
     var showAllItems: Bool {
         didSet {
             guard showAllItems != oldValue else { return }
             UserDefaults.standard.set(showAllItems, forKey: Self.showAllItemsKey)
+            MenuBarHider.shared.collectsAll = showAllItems
+            settleCollector()
             refresh()
         }
     }
@@ -168,6 +170,7 @@ final class HiddenItemsStore {
     @ObservationIgnored private var appIconCache: [pid_t: NSImage] = [:]
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var periodic: Task<Void, Never>?
+    @ObservationIgnored private var separatorSettling: Task<Void, Never>?
     /// 每块屏幕上次读过的壁纸（路径 + 修改时间），变了才重新估算深浅
     @ObservationIgnored private var wallpaperKeys: [Int: WallpaperTone.Key] = [:]
     /// 第一次全量扫描完成之前，增量扫描不知道哪些 App 有图标，结果不可信
@@ -201,11 +204,15 @@ final class HiddenItemsStore {
         guard periodic == nil else { return }
         // 第一次扫描之前先按记下的猜：有永远隐藏的图标，永远隐藏分隔符就一直伸长
         MenuBarHider.shared.hasAlwaysHiddenItems = !alwaysHiddenIDs.isEmpty
+        MenuBarHider.shared.collectsAll = showAllItems
 
         Permissions.shared.onChange = { [weak self] in self?.refresh(full: true, forceCapture: true) }
         MenuBarHider.shared.onLayoutChange = { [weak self] in self?.refresh(after: .milliseconds(400)) }
         // 等分隔符就位再做首次全量扫描
-        MenuBarHider.shared.onReady = { [weak self] in self?.refresh(full: true, forceCapture: true) }
+        MenuBarHider.shared.onReady = { [weak self] in
+            self?.settleCollector()
+            self?.refresh(full: true, forceCapture: true)
+        }
 
         let workspace = NSWorkspace.shared.notificationCenter
         observers.append(workspace.addObserver(forName: NSWorkspace.didLaunchApplicationNotification,
@@ -247,6 +254,44 @@ final class HiddenItemsStore {
                 tick += 1
                 self?.refresh(full: tick % 6 == 0)
             }
+        }
+    }
+
+    // MARK: - 显示全部图标
+
+    /// 收纳符要紧挨在开关左边：夹在中间的图标不会被收走，跑到开关右边会把开关也挤出屏幕。
+    /// 系统记的位置数值不精确，放下去以后核对，不对就一点点挪（它和开关之间的图标都在屏幕上，位置是准的）
+    private func settleCollector() {
+        separatorSettling?.cancel()
+        guard showAllItems else { return }
+        separatorSettling = Task { [scanner] in
+            let own = MenuBarScanner.AppInfo(NSRunningApplication.current)
+            var previous: [CGRect] = []
+            for _ in 0..<30 {
+                // 状态栏图标新建以后要过一会儿才排好：连续两次扫描位置一致才算数
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled, self.showAllItems else { return }
+                let result = await scanner.scan(adding: [], own: own, isFull: false)
+                let frames = result.items.map(\.frame) + [result.collector, result.toggle].compactMap { $0 }
+                guard let collector = result.collector, let toggle = result.toggle, frames == previous else {
+                    previous = frames
+                    continue
+                }
+                let delta: CGFloat
+                if collector.minX > toggle.minX {
+                    delta = 12
+                } else if result.items.contains(where: {
+                    $0.isMovable && $0.frame.minX >= collector.maxX - 1 && $0.frame.maxX <= toggle.minX + 1
+                }) {
+                    delta = -12
+                } else {
+                    break
+                }
+                log.notice("收纳符没到位，再挪 \(Int(delta))")
+                MenuBarHider.shared.nudgeCollector(by: delta)
+                previous = []
+            }
+            self.refresh(after: .milliseconds(400))
         }
     }
 
