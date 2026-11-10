@@ -108,7 +108,7 @@ final class ClickForwarder {
         }
         let pids = Self.relatedProcesses(of: item)
         let baseline = await InterfaceWatcher.windows(of: pids)
-        _ = await scanner.press(item.element)
+        await press(item, at: itemFrame)
         watchedItemID = item.id
         defer { watchedItemID = nil }
 
@@ -116,7 +116,7 @@ final class ClickForwarder {
         var opened = await InterfaceWatcher.waitUntilOpened(pids: pids, baseline: baseline, timeout: .milliseconds(500))
         var moved = false
         if !opened.isEmpty, let destination, let activeBar {
-            moved = await PopupRelocator.relocate(opened, anchoredTo: itemFrame, in: activeBar, to: destination)
+            moved = await PopupRelocator.relocate(opened, of: item.element, pid: item.pid, anchoredTo: itemFrame, in: activeBar, to: destination)
         }
 
         // 图标在屏幕外，弹出来的东西挪不动、也不在屏幕上：把图标露出来
@@ -141,10 +141,10 @@ final class ClickForwarder {
                 // 屏幕外那次没真正打开（只留下 1×1 的空窗口）才再按一次；已经开着的再按就关掉了
                 if InterfaceWatcher.placements(of: opened).values.allSatisfy({ $0.frame.width <= 8 }) {
                     let baseline = await InterfaceWatcher.windows(of: pids)
-                    _ = await scanner.press(item.element)
+                    await press(item, at: itemFrame)
                     opened = await InterfaceWatcher.waitUntilOpened(pids: pids, baseline: baseline, timeout: .milliseconds(500))
                     if !opened.isEmpty, let destination, let activeBar {
-                        moved = await PopupRelocator.relocate(opened, anchoredTo: itemFrame, in: activeBar, to: destination)
+                        moved = await PopupRelocator.relocate(opened, of: item.element, pid: item.pid, anchoredTo: itemFrame, in: activeBar, to: destination)
                     }
                 }
             }
@@ -166,6 +166,19 @@ final class ClickForwarder {
             await InterfaceWatcher.waitUntilClosed(pids: pids, opened: opened)
         }
         if moved { model.menuDidClose(choseItem: false) }
+    }
+
+    /// 对真实图标"按下"。有的图标自己接鼠标事件（实测 Neat Download Manager），辅助功能里列着"按下"
+    /// 却回"不支持"：改成往图标的窗口发一次定向点击（不动光标，图标在屏幕外也收得到）
+    private func press(_ item: MenuBarItem, at frame: CGRect) async {
+        let result = await HiddenItemsStore.shared.scanner.press(item.element)
+        guard result == .actionUnsupported else { return }
+        guard let window = StatusBarRows.current().window(containing: frame.center) else {
+            log.error("\(item.id, privacy: .public) 不支持辅助功能的按下，也找不到它的窗口")
+            return
+        }
+        log.info("\(item.id, privacy: .public) 不支持辅助功能的按下，改发定向点击")
+        await Self.postClick(at: frame.center, window: window.id, pid: window.ownerPID)
     }
 
     /// 图标所在的进程，加上同一个 App 的其他进程：有的 App 图标挂在辅助进程上，弹窗却是主进程开的

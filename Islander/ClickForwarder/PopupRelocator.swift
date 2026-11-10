@@ -57,11 +57,12 @@ enum PopupRelocator {
 
     /// - Parameters:
     ///   - windows: "按下"之后这个 App 新出现的窗口
+    ///   - source: 真实图标和它所在的进程
     ///   - item: 真实图标按下时的位置（藏起来的图标在屏幕外）
     ///   - bar: 活动的那一行菜单栏
     /// - Returns: 是否挪动了至少一个窗口
     @concurrent
-    static func relocate(_ windows: Set<CGWindowID>, anchoredTo item: CGRect,
+    static func relocate(_ windows: Set<CGWindowID>, of source: AXRef, pid sourcePID: pid_t, anchoredTo item: CGRect,
                          in bar: MenuBar, to destination: Destination) async -> Bool {
         // 跨屏挪过来的系统面板不显示（实测），活动行不在岛这块屏幕上就不挪
         guard bar.screen == destination.screen else { return false }
@@ -91,29 +92,67 @@ enum PopupRelocator {
         }
         guard !anchored.isEmpty else { return false }
 
-        var moved = false
+        /// 能挪的东西：辅助功能窗口，或者 NSPopover 的气泡
+        struct Popup {
+            let element: AXUIElement
+            let frame: CGRect
+            /// 气泡尖角的水平位置（知道的话）
+            var tip: CGFloat? = nil
+        }
+        func isTarget(_ frame: CGRect, of pid: pid_t, exactly: Bool) -> Bool {
+            anchored.contains { placement in
+                let target = placement.frame
+                guard placement.pid == pid else { return false }
+                // 气泡弹出时带放大动画：窗口服务器里还在长大，辅助功能报告的已经是最终大小
+                guard exactly else { return frame.insetBy(dx: -2, dy: -2).contains(target) }
+                return abs(target.minX - frame.minX) < 2 && abs(target.minY - frame.minY) < 2
+                    && abs(target.width - frame.width) < 2 && abs(target.height - frame.height) < 2
+            }
+        }
+        func popovers(under parent: AXUIElement, of pid: pid_t) -> [Popup] {
+            AX.elements(parent, kAXChildrenAttribute).compactMap { child in
+                guard AX.string(child, kAXRoleAttribute) == kAXPopoverRole,
+                      let frame = AX.frame(child), isTarget(frame, of: pid, exactly: false)
+                else { return nil }
+                return Popup(element: child, frame: frame)
+            }
+        }
+
         // 弹窗不一定属于图标所在的进程（飞书的图标在辅助进程里，弹窗是主进程的）
+        var popups: [Popup] = []
         for pid in Set(anchored.map(\.pid)) {
-            let targets = anchored.filter { $0.pid == pid }.map(\.frame)
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.5)
-            for element in AX.elements(app, kAXWindowsAttribute) {
-                guard let frame = AX.frame(element),
-                      targets.contains(where: { abs($0.minX - frame.minX) < 2 && abs($0.minY - frame.minY) < 2
-                          && abs($0.width - frame.width) < 2 && abs($0.height - frame.height) < 2 })
-                else { continue }
-                // 普通窗口（App 的主窗口等）碰巧在那个位置：不是弹窗，不能动
-                if AX.string(element, kAXSubroleAttribute) == kAXStandardWindowSubrole { continue }
-                // 贴着图标的保持和图标的相对位置；被贴到屏幕边上的，居中放在被点的图标下面。水平方向不出岛所在的屏幕
-                let x = hugsItem(frame) ? frame.minX + delta.dx : destination.midX - frame.width / 2
-                let maxX = max(destination.screen.maxX - frame.width, destination.screen.minX)
-                var origin = CGPoint(x: min(max(x, destination.screen.minX), maxX), y: frame.minY + delta.dy)
-                guard let value = AXValueCreate(.cgPoint, &origin),
-                      AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value) == .success,
-                      let after = AX.frame(element), abs(after.minX - origin.x) < 2, abs(after.minY - origin.y) < 2
-                else { continue }
-                moved = true
+            for window in AX.elements(app, kAXWindowsAttribute) {
+                guard let frame = AX.frame(window) else { continue }
+                if isTarget(frame, of: pid, exactly: true) {
+                    // 普通窗口（App 的主窗口等）碰巧在那个位置：不是弹窗，不能动
+                    if AX.string(window, kAXSubroleAttribute) != kAXStandardWindowSubrole {
+                        popups.append(Popup(element: window, frame: frame))
+                    }
+                } else if frame.width <= 8, frame.height <= 8 {
+                    // 气泡不是辅助功能窗口，挂在弹出它的东西下面。图标在屏幕外时，有的 App 在屏幕角上放一个
+                    // 1×1 的窗口，让气泡从那里弹出（实测 pap.er）：尖角指着那个窗口
+                    popups += popovers(under: window, of: pid).map { Popup(element: $0.element, frame: $0.frame, tip: frame.midX) }
+                }
             }
+        }
+        // 图标在屏幕上时，气泡直接挂在图标下面
+        popups += popovers(under: source.element, of: sourcePID)
+
+        var moved = false
+        for popup in popups {
+            let frame = popup.frame
+            // 贴着图标的保持和图标的相对位置；被贴到屏幕边上的，居中（气泡是尖角）放在被点的图标下面。
+            // 水平方向不出岛所在的屏幕
+            let x = hugsItem(frame) ? frame.minX + delta.dx : destination.midX - (popup.tip.map { $0 - frame.minX } ?? frame.width / 2)
+            let maxX = max(destination.screen.maxX - frame.width, destination.screen.minX)
+            var origin = CGPoint(x: min(max(x, destination.screen.minX), maxX), y: frame.minY + delta.dy)
+            guard let value = AXValueCreate(.cgPoint, &origin),
+                  AXUIElementSetAttributeValue(popup.element, kAXPositionAttribute as CFString, value) == .success,
+                  let after = AX.frame(popup.element), abs(after.minX - origin.x) < 2, abs(after.minY - origin.y) < 2
+            else { continue }
+            moved = true
         }
         return moved
     }

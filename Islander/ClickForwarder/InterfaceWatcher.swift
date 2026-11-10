@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 
 /// 判断点开的菜单 / 弹窗什么时候关闭：对比点击前后这个 App（含它的辅助进程）在屏幕上的窗口。
-/// 菜单栏图标本身的窗口（状态栏层级）不算。所有轮询都在后台线程。
+/// 菜单栏图标本身的窗口（状态栏层级、和菜单栏差不多高）不算。所有轮询都在后台线程。
 enum InterfaceWatcher {
     @concurrent
     static func windows(of pids: Set<pid_t>) async -> Set<CGWindowID> {
@@ -65,9 +65,14 @@ enum InterfaceWatcher {
         var result = Set<CGWindowID>()
         for info in list {
             guard let owner = info[kCGWindowOwnerPID as String] as? pid_t, pids.contains(owner),
-                  (info[kCGWindowLayer as String] as? Int) != statusLayer,
                   let number = info[kCGWindowNumber as String] as? NSNumber
             else { continue }
+            // 状态栏层级里不只有图标：有的 App 把弹窗也放在这一层（实测 pap.er 的面板）。按高度分，图标窗口不比菜单栏高
+            if (info[kCGWindowLayer as String] as? Int) == statusLayer {
+                guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                      let frame = CGRect(dictionaryRepresentation: bounds), frame.height > 50
+                else { continue }
+            }
             result.insert(number.uint32Value)
         }
         return result
