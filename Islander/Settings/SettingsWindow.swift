@@ -154,7 +154,6 @@ private struct SidebarIcon: View {
 
 private struct GeneralPane: View {
     @Bindable private var settings = AppSettings.shared
-    private var hider: MenuBarHider { .shared }
 
     var body: some View {
         Form {
@@ -176,20 +175,16 @@ private struct GeneralPane: View {
             Section {
                 Toggle("在 Dock 中显示", isOn: $settings.showInDock)
             } footer: {
-                Text("点 Dock 图标打开设置；右键它可以隐藏 / 显示菜单栏图标、展开灵动岛。关掉后，从菜单栏上的岛民图标右键打开设置，或者再次打开岛民 App。")
+                Text("点 Dock 图标打开设置；右键它可以展开灵动岛、调整菜单栏布局。关掉后，点菜单栏上的岛民图标打开设置，或者再次打开岛民 App。")
                     .foregroundStyle(.secondary)
             }
 
             Section {
-                Toggle("把分隔线左边的图标藏起来", isOn: Binding(
-                    get: { hider.isHidden },
-                    set: { hider.setHidden($0, interactive: true) }
-                ))
-                LabeledContent("哪些图标藏起来") {
+                LabeledContent("哪些图标藏到岛上") {
                     Button("调整菜单栏布局…") { SettingsController.shared.state.pane = .layout }
                 }
             } footer: {
-                Text("藏起来的图标不占菜单栏，鼠标移到刘海上时出现在灵动岛里。点菜单栏上的岛民图标也能切换。")
+                Text("藏到岛上的图标不占菜单栏，鼠标移到刘海上时出现在灵动岛里。")
                     .foregroundStyle(.secondary)
             }
 

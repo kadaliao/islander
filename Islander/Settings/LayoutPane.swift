@@ -78,7 +78,7 @@ struct LayoutPane: View {
                           caption: "平时不占菜单栏，鼠标移到刘海上时出现在灵动岛里。",
                           empty: "把图标拖到这里，它就会藏到岛上", items: zones.hidden, zones: zones)
                     shelf(.alwaysHidden, title: "永远隐藏", symbol: "eye.slash",
-                          caption: "菜单栏和岛上都不显示，点开关显示藏起来的图标时也不出来。要用时按住 ⌥ 再把鼠标移到刘海上。",
+                          caption: "菜单栏和岛上都不显示。要用时按住 ⌥ 再把鼠标移到刘海上。",
                           empty: "把不想看到的图标拖到这里", items: zones.alwaysHidden, zones: zones)
                 }
 

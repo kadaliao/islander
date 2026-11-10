@@ -14,7 +14,6 @@ private let log = Logger(subsystem: "com.kadaliao.islander", category: "debug")
 ///     com.kadaliao.islander.debug.settings  object = 页面名（general / layout / island / permissions / about）：打开设置
 ///     com.kadaliao.islander.debug.window    object = PNG 路径：把设置窗口截图存下来
 ///     com.kadaliao.islander.debug.move      object = "图标>always / hidden / visible[@放在它前面的图标]"：移动菜单栏图标
-///     com.kadaliao.islander.debug.hidden    object = "on" / "off"：藏起 / 显示分隔线左边的图标
 ///     com.kadaliao.islander.debug.layout    打印当前菜单栏布局
 ///     com.kadaliao.islander.debug.showall   object = "on" / "off"：岛上显示全部图标
 ///     com.kadaliao.islander.debug.windows   打印菜单栏图标窗口（编号、位置、标题）
@@ -156,9 +155,6 @@ enum DebugHooks {
         }
         observe("slow") { value in
             TuningStore.shared.tuning.slowMotion = Double(value) ?? 1
-        }
-        observe("hidden") { value in
-            MenuBarHider.shared.setHidden(value == "on", interactive: false)
         }
         observe("layout") { _ in
             let items = HiddenItemsStore.shared.allItems

@@ -43,8 +43,8 @@ The interface is in Simplified Chinese.
   and the island. Hold ⌥ while pointing at the notch to see them anyway.
 - **Matches your menu bar.** A black island on a dark menu bar, frosted glass on
   a light one, or pick one in Settings.
-- **Optional Dock icon.** Click it to open Settings; right-click it to hide or
-  show icons and open the island.
+- **Optional Dock icon.** Click it to open Settings; right-click it to open the
+  island or the menu bar layout.
 
 ## Install
 

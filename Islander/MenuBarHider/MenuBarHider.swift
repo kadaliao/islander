@@ -4,18 +4,19 @@ import os
 
 private let log = Logger(subsystem: "com.kadaliao.islander", category: "hider")
 
-/// 用"永远隐藏分隔符 + 分隔符 + 开关"三个状态栏图标隐藏菜单栏图标。
+/// 用"永远隐藏分隔符 + 分隔符 + 岛民图标"三个状态栏图标隐藏菜单栏图标。
 ///
 ///     [永远隐藏的图标…] ⋮ [藏到岛上的图标…] |  [常显图标…]  ◖岛民◗  [系统图标]
-///                      ↑ 永远隐藏分隔符     ↑ 分隔符                ↑ 开关
+///                      ↑ 永远隐藏分隔符     ↑ 分隔符                ↑ 岛民图标
 ///
-/// 隐藏时把分隔符的长度设成 10000，它左边的图标全被挤出屏幕；显示时恢复成一条细线。
-/// 有永远隐藏的图标时，永远隐藏分隔符一直是 10000 长：用户点开关"显示藏起来的图标"时，它左边的图标仍然在屏幕外。
-/// 只有在设置里调整布局、或者打开一个只能在菜单栏里点开的永远隐藏图标时，才临时缩回细线。
-/// 没有永远隐藏的图标时它缩成一段看不见的空白（新出现的图标可能落在它左边，不能把它们一直挤在屏幕外）。
+/// 分隔符一直是 10000 长，它左边的图标全被挤出屏幕：藏到岛上的图标只在岛上出现，菜单栏上不再露出来。
+/// 只有替用户移动图标（MenuBarItemMover）、或者打开一个只能在菜单栏里点开的图标（ClickForwarder）时，
+/// 才临时缩回细线。
+/// 永远隐藏分隔符在有永远隐藏的图标时同样一直是 10000 长；
+/// 没有永远隐藏的图标时缩成一段看不见的空白（新出现的图标可能落在它左边，不能把它们一直挤在屏幕外）。
 /// 哪些图标在分隔符左边，由用户在设置的「菜单栏布局」里调整（MenuBarItemMover 替用户 ⌘ 拖动），
-/// 或者用户自己按住 ⌘ 拖动（系统原生行为）；位置由系统按 autosaveName 记住；
-/// 显示 / 隐藏状态由我们存在 UserDefaults 里，重启后恢复。
+/// 或者用户自己按住 ⌘ 把菜单栏上的图标拖到左边（系统原生行为）；位置由系统按 autosaveName 记住。
+/// 点岛民图标（左键右键都一样）打开岛民的菜单。
 @MainActor
 @Observable
 final class MenuBarHider: NSObject {
@@ -27,13 +28,13 @@ final class MenuBarHider: NSObject {
         static let alwaysHidden = "IslanderAlwaysHiddenSeparator"
         static let collector = "IslanderCollector"
     }
-    private static let hiddenKey = "menuBarItemsHidden"
+    /// 以前版本存的"图标藏没藏起来"，现在一直藏着，启动时清掉
+    private static let legacyHiddenKey = "menuBarItemsHidden"
 
     /// 隐藏时分隔符的长度：足够把它左边的所有图标挤出任何屏幕
     private static let hidingLength: CGFloat = 10_000
     private static let separatorLength: CGFloat = 12
 
-    private(set) var isHidden = false
     /// 点击岛上图标、调整布局期间，临时把图标露出来
     private(set) var isTemporarilyRevealed = false
     /// 临时露出时连永远隐藏的也露出来
@@ -43,9 +44,9 @@ final class MenuBarHider: NSObject {
         didSet { if hasAlwaysHiddenItems != oldValue { applyLengths() } }
     }
 
-    /// 图标位置发生变化（显示 / 隐藏切换）后调用，用来刷新岛上的内容
+    /// 图标位置发生变化（临时露出结束、分隔符换了位置）后调用，用来刷新岛上的内容
     @ObservationIgnored var onLayoutChange: (() -> Void)?
-    /// 启动时分隔符就位、隐藏状态恢复完成后调用一次。在这之前扫描会拿到位置正在变化的快照
+    /// 启动时分隔符就位、图标藏好后调用一次。在这之前扫描会拿到位置正在变化的快照
     @ObservationIgnored var onReady: (() -> Void)? {
         didSet { if isReady { onReady?() } }
     }
@@ -82,8 +83,9 @@ final class MenuBarHider: NSObject {
         if let button = toggle.button {
             button.target = self
             button.action = #selector(toggleClicked)
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            button.toolTip = "点按：显示 / 隐藏图标\n右键：菜单"
+            // 按下就打开菜单，和系统的菜单栏图标一样
+            button.sendAction(on: [.leftMouseDown, .rightMouseDown])
+            button.toolTip = "岛民"
             button.setAccessibilityIdentifier(MenuBarScanner.toggleIdentifier)
         }
         toggleItem = toggle
@@ -92,7 +94,7 @@ final class MenuBarHider: NSObject {
         createAlwaysHiddenSeparator()
         applyLengths()
 
-        // 新建的图标要过一会儿才排进菜单栏，排好后再检查位置、恢复隐藏状态
+        // 新建的图标要过一会儿才排进菜单栏，排好后再检查位置、把图标藏起来
         Task {
             var attempts = 0
             while Self.settledFrames([alwaysHiddenItem, separatorItem, toggleItem]) == nil, attempts < 60 {
@@ -175,6 +177,10 @@ final class MenuBarHider: NSObject {
            }) {
             log.notice("分隔符在屏幕外 \(String(describing: frame), privacy: .public)，挪到开关左边")
             moveSeparator(to: positionLeftOfToggle() ?? 1)
+        } else if let frames, frames[0].maxX > frames[1].minX + 1 {
+            // 分隔符跑到了开关右边（用户 ⌘ 拖过）：伸长后会把开关自己也挤出屏幕，再也点不到。挪回开关左边
+            log.notice("分隔符在开关右边，挪到开关左边")
+            moveSeparator(to: positionLeftOfToggle() ?? 1)
         }
 
         // 永远隐藏分隔符必须在分隔符左边，否则它会把该藏到岛上的、甚至常显的图标一起挤出屏幕：放回最左边
@@ -186,49 +192,28 @@ final class MenuBarHider: NSObject {
             applyLengths()
         }
 
+        UserDefaults.standard.removeObject(forKey: Self.legacyHiddenKey)
         createCollectorIfNeeded()
+        isHiding = true
         applyLengths()
-        let restoreHidden = UserDefaults.standard.bool(forKey: Self.hiddenKey)
-        if restoreHidden {
-            setHidden(true, interactive: false)
-        }
         // 刚改完分隔符长度，图标还要约 150ms 才移到位
         Task {
-            if restoreHidden { try? await Task.sleep(for: .milliseconds(400)) }
+            try? await Task.sleep(for: .milliseconds(400))
             isReady = true
             onReady?()
         }
     }
 
-    func toggle() {
-        setHidden(!isHidden, interactive: true)
-    }
-
-    func setHidden(_ hidden: Bool, interactive: Bool) {
-        if hidden, !isOrderValid {
-            log.error("分隔符在开关右边，拒绝隐藏")
-            if interactive { warnWrongOrder() }
-            return
-        }
-        isHidden = hidden
-        isTemporarilyRevealed = false
-        temporarilyRevealsAlwaysHidden = false
-        UserDefaults.standard.set(hidden, forKey: Self.hiddenKey)
-        applyLengths()
-        log.info("菜单栏图标 \(hidden ? "隐藏" : "显示", privacy: .public)")
-        onLayoutChange?()
-    }
-
-    /// 临时露出被隐藏的图标（不改变、不保存隐藏状态）
+    /// 临时露出被隐藏的图标
     /// - Parameter includingAlwaysHidden: 连永远隐藏的也露出来
     func beginTemporaryReveal(includingAlwaysHidden: Bool = false) {
-        guard isHidden || includingAlwaysHidden, !isTemporarilyRevealed else { return }
+        guard !isTemporarilyRevealed else { return }
         isTemporarilyRevealed = true
         temporarilyRevealsAlwaysHidden = includingAlwaysHidden
         applyLengths()
     }
 
-    /// 结束临时露出：恢复成原来的显示 / 隐藏状态
+    /// 结束临时露出：重新藏起来
     func endTemporaryReveal() {
         guard isTemporarilyRevealed else { return }
         isTemporarilyRevealed = false
@@ -329,9 +314,12 @@ final class MenuBarHider: NSObject {
 
     // MARK: - 私有
 
-    /// 按当前状态设置两条分隔符的长度和开关的样子
+    /// 启动时位置检查完之前不伸长分隔符：新建的图标还没排好，伸长了会把排错位置的图标（甚至开关）挤出屏幕
+    @ObservationIgnored private var isHiding = false
+
+    /// 按当前状态设置两条分隔符和收纳符的长度
     private func applyLengths() {
-        let showsHidden = !isHidden || isTemporarilyRevealed
+        let showsHidden = !isHiding || isTemporarilyRevealed
         let showsAlwaysHidden = showsHidden && (!hasAlwaysHiddenItems
             || (isTemporarilyRevealed && temporarilyRevealsAlwaysHidden))
         separatorItem?.length = showsHidden ? Self.separatorLength : Self.hidingLength
@@ -344,48 +332,20 @@ final class MenuBarHider: NSObject {
         collectorItem?.isVisible = collectsAll
         collectorItem?.length = collectsAll && !showsHidden ? Self.hidingLength : Self.separatorLength
 
-        let hidden = isHidden
-        let symbol = hidden ? "capsule.fill" : "capsule"
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: hidden ? "显示隐藏的图标" : "隐藏图标")
-        image?.isTemplate = true
-        toggleItem?.button?.image = image
-    }
-
-    /// 分隔符必须在开关左边，否则隐藏时开关会被一起挤出屏幕，用户就没法再点回来
-    private var isOrderValid: Bool {
-        guard let frames = Self.settledFrames([separatorItem, toggleItem]) else {
-            return true  // 还没排好位置，无从判断
+        if toggleItem?.button?.image == nil {
+            let image = NSImage(systemSymbolName: "capsule.fill", accessibilityDescription: "岛民")
+            image?.isTemplate = true
+            toggleItem?.button?.image = image
         }
-        return frames[0].maxX <= frames[1].minX + 1
     }
 
     @objc private func toggleClicked() {
-        guard Date() >= ignoresToggleClicksUntil, let event = NSApp.currentEvent else { return }
-        let wantsMenu = event.type == .rightMouseUp
-            || event.modifierFlags.contains(.control)
-            || event.modifierFlags.contains(.option)
-        if wantsMenu {
-            showContextMenu()
-        } else {
-            toggle()
-        }
-    }
-
-    private func showContextMenu() {
-        guard let toggleItem, let contextMenu else { return }
-        // 临时挂上菜单再模拟点击：菜单会出现在图标正下方，关闭后再摘掉，左键仍然是切换
+        guard Date() >= ignoresToggleClicksUntil, let toggleItem, let contextMenu else { return }
+        // 不能一直挂着菜单：岛民切换活动菜单栏时会往开关上发一次点击，那次不该弹菜单。
+        // 所以临时挂上菜单再模拟点击，菜单出现在图标正下方，关闭后再摘掉
         toggleItem.menu = contextMenu
         toggleItem.button?.performClick(nil)
         toggleItem.menu = nil
-    }
-
-    private func warnWrongOrder() {
-        let alert = NSAlert()
-        alert.messageText = "分隔符跑到了岛民图标的右边"
-        alert.informativeText = "这样隐藏会把岛民图标自己也藏起来。请按住 ⌘，把细竖线「|」拖回岛民图标的左边，再试一次。"
-        alert.addButton(withTitle: "好")
-        NSApp.activate()
-        alert.runModal()
     }
 
     // MARK: - 首选位置

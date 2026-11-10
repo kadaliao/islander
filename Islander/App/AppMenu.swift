@@ -1,6 +1,6 @@
 import AppKit
 
-/// 右键菜单栏上的岛民图标、右键 Dock 图标弹出的菜单
+/// 点菜单栏上的岛民图标、右键 Dock 图标弹出的菜单
 @MainActor
 final class AppMenu: NSObject, NSMenuDelegate {
     let menu = NSMenu()
@@ -26,7 +26,6 @@ final class AppMenu: NSObject, NSMenuDelegate {
 
     private func addCommonItems(to menu: NSMenu) {
         if addUpdateItem(to: menu) { menu.addItem(.separator()) }
-        addItem(MenuBarHider.shared.isHidden ? "显示藏起来的图标" : "藏起图标", #selector(toggleHidden), to: menu)
         addItem("展开 / 收起灵动岛", #selector(toggleIsland), to: menu)
         addItem("在岛上显示全部图标", #selector(toggleShowAll), to: menu)
             .state = HiddenItemsStore.shared.showAllItems ? .on : .off
@@ -59,7 +58,6 @@ final class AppMenu: NSObject, NSMenuDelegate {
         return item
     }
 
-    @objc private func toggleHidden() { MenuBarHider.shared.toggle() }
     @objc private func toggleIsland() { ScreenManager.shared.toggleAll() }
     @objc private func toggleShowAll() { HiddenItemsStore.shared.showAllItems.toggle() }
     @objc private func openLayout() { SettingsController.shared.show(.layout) }
