@@ -11,7 +11,8 @@ private let log = Logger(subsystem: "com.kadaliao.islander", category: "mover")
 /// 按下、松开两个事件直接指名发给图标所在的窗口（窗口编号写在事件里），图标在不在屏幕上都行，
 /// 不用露出隐藏的图标、不用拖光标，刘海也挡不住。图标窗口编号跟着图标走，移动后用窗口服务器的实时位置核对。
 ///
-/// 定向事件没起作用时，退回到合成一次真实的拖动：先把藏起来的图标露出来，按住图标拖到目标位置松手。
+/// 定向事件没起作用、或者图标对不上窗口发不出去时，退回到合成一次真实的拖动：
+/// 先把藏起来的图标露出来，按住图标拖到目标位置松手。
 /// 拖动期间鼠标和光标暂时脱钩，结束后光标回到原位。实测规律（macOS 26.7）：
 /// - 只对活动的那一行菜单栏有效，辅助功能报告的位置也只属于这一行；
 /// - 刘海后面的图标抓不起来，落点在刘海后面结果不可控；刘海左边被挤压的图标拖了也没反应，
@@ -44,7 +45,8 @@ final class MenuBarItemMover {
         case noPermission
         case notFound
         case immovable
-        case busy
+        /// 图标和窗口对不上（附带原因），定向事件发不出去；退回真实拖动也没成功时报给用户
+        case unmapped(String)
         case blocked
         case didNotMove
 
@@ -56,8 +58,8 @@ final class MenuBarItemMover {
                 "菜单栏上找不到这个图标了，可能它的 App 刚退出。"
             case .immovable:
                 "这是系统固定的图标，不能移动。"
-            case .busy:
-                "菜单栏正在变化，请稍后再试。"
+            case .unmapped(let reason):
+                "没能移动这个图标：菜单栏上的图标和窗口对不上，改用拖动也没成功。\n详情：\(reason)"
             case .blocked, .didNotMove:
                 "没能移动这个图标，请再试一次。"
             }
@@ -107,9 +109,25 @@ final class MenuBarItemMover {
             movingItemID = nil
         }
 
-        if try await moveWithTargetedEvents(itemID, to: destination) { return }
-        log.notice("定向事件没起作用，改用真实拖动：\(itemID, privacy: .public)")
-        try await moveByDragging(itemID, to: destination)
+        // 对照表建不起来时定向事件发不出去，但真实拖动用不着它，还有机会成功
+        var unmapped: String?
+        do {
+            if try await moveWithTargetedEvents(itemID, to: destination) { return }
+            log.notice("定向事件没起作用，改用真实拖动：\(itemID, privacy: .public)")
+        } catch MoveError.unmapped(let reason) {
+            log.notice("对不上窗口，改用真实拖动：\(itemID, privacy: .public)")
+            unmapped = reason
+        }
+        do {
+            try await moveByDragging(itemID, to: destination)
+        } catch let error as MoveError {
+            // 两条路都没走通：报出对不上窗口的原因，才看得出卡在哪一环。找不到、不能动这类明确的原因照常报
+            guard let unmapped else { throw error }
+            switch error {
+            case .blocked, .didNotMove: throw MoveError.unmapped(unmapped)
+            default: throw error
+            }
+        }
     }
 
     /// 扫描结果里每个图标的位置都对得上窗口服务器里的窗口（辅助功能报告的位置不是旧的）
@@ -158,15 +176,23 @@ final class MenuBarItemMover {
     }
 
     /// 当前活动那一行菜单栏的图标窗口，每个窗口标上它是哪个图标。
-    /// 辅助功能报告的位置偶尔是旧的，对不上窗口时等一下重扫，绝不猜：认错了就会拖走别的图标
+    /// 辅助功能报告的位置偶尔是旧的，对不上窗口时等一下重扫，绝不猜：认错了就会拖走别的图标。
+    /// 一直对不上就抛出 `.unmapped`，带上最后一次对不上的原因
     private func windowBar() async throws -> MenuBarSnapshot {
         let own = MenuBarScanner.AppInfo(NSRunningApplication.current)
+        var reason = ""
         for _ in 0..<12 {
             let result = await HiddenItemsStore.shared.scanner.scan(adding: [], own: own, isFull: false)
-            if let bar = MenuBarSnapshot(mapping: result, knownWindows: HiddenItemsStore.shared.itemWindows) { return bar }
+            do {
+                return try MenuBarSnapshot(mapping: result, knownWindows: HiddenItemsStore.shared.itemWindows)
+            } catch {
+                reason = "\(error)"
+            }
             try? await Task.sleep(for: .milliseconds(150))
         }
-        throw MoveError.busy
+        // 用 notice：用户抓日志时 debug 级别的看不到
+        log.notice("图标和窗口对不上：\(reason, privacy: .public)")
+        throw MoveError.unmapped(reason)
     }
 
     private nonisolated static func postTargetedMove(window: CGWindowID, pid: pid_t, start: CGPoint,
@@ -387,19 +413,23 @@ struct MenuBarSnapshot {
     /// 图标的窗口编号跟着图标走，`knownWindows` 里记着的直接认。岛民自己的三个窗口按窗口标题认。
     /// 其他没记过的按辅助功能报告的位置认，但屏幕外的图标位置整体偏了一截（每次扫描偏得还不一样），
     /// 好在同一次扫描里偏移是一致的：用它右边最近的岛民窗口量出偏移，校正后差几 pt 以内才算对上。
-    /// 对不上就返回 nil，绝不猜：认错了就会拖走别的图标
-    init?(mapping result: MenuBarScanner.Result, knownWindows: [String: CGWindowID] = [:]) {
-        guard let separatorAX = result.separator, let toggleAX = result.toggle else { return nil }
+    /// 对不上就抛出原因，绝不猜：认错了就会拖走别的图标
+    init(mapping result: MenuBarScanner.Result, knownWindows: [String: CGWindowID] = [:]) throws(MappingFailure) {
+        guard let separatorAX = result.separator, let toggleAX = result.toggle else {
+            throw MappingFailure("辅助功能里找不到岛民的\(result.separator == nil ? "分隔符" : "开关")")
+        }
         let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
         let tops = NSScreen.screens.map { primaryTop - $0.frame.maxY }
-        guard let top = tops.filter({ $0 <= separatorAX.midY }).max() else { return nil }
+        guard let top = tops.filter({ $0 <= separatorAX.midY }).max() else {
+            throw MappingFailure("分隔符不在任何屏幕的菜单栏上（y=\(Int(separatorAX.midY))）")
+        }
         let chain = result.rows.chain(top: top)
-        guard !chain.isEmpty else { return nil }
+        guard !chain.isEmpty else { throw MappingFailure("窗口服务器里 y=\(Int(top)) 这一行没有图标窗口") }
         let inChain = Set(chain.map(\.id))
         var labels: [CGWindowID: (id: String, isMovable: Bool)] = [:]
 
         // 岛民自己的窗口：记着的 → 标题 → 宽度和位置
-        var anchors: [(ax: CGRect, window: StatusBarRows.Window)] = []
+        var anchors: [(id: String, ax: CGRect, window: StatusBarRows.Window)] = []
         let own: [(id: String, name: String, ax: CGRect?)] = [
             (Self.alwaysHiddenSeparatorID, "IslanderAlwaysHiddenSeparator", result.alwaysHiddenSeparator),
             (Self.separatorID, "IslanderSeparator", separatorAX),
@@ -425,11 +455,12 @@ struct MenuBarSnapshot {
             }()
             guard let window, labels[window.id] == nil else {
                 if id == Self.alwaysHiddenSeparatorID || id == Self.collectorID { continue }
-                log.debug("对不上窗口：\(id, privacy: .public)")
-                return nil
+                let found = window.flatMap { labels[$0.id] }.map { "窗口已认给 \($0.id)" } ?? "链上没有对得上的窗口"
+                let names = chain.contains { $0.name != nil } ? "" : "，读不到窗口标题（没有屏幕录制权限？）"
+                throw MappingFailure("认不出 \(id) 的窗口：\(found)，辅助功能 x=\(Int(ax.minX)) 宽 \(Int(ax.width))\(names)")
             }
             labels[window.id] = (id, false)
-            anchors.append((ax, window))
+            anchors.append((id, ax, window))
         }
 
         // 其他图标：记着的直接认
@@ -441,7 +472,10 @@ struct MenuBarSnapshot {
                 pending.append(item)
             }
         }
-        // 没记过的：按右边最近的岛民窗口校正位置。Control Center 偶尔会额外挂一个和别人窗口重合的元素，
+        // 没记过的：按右边最近的岛民窗口校正位置。锚点要按位置排：收纳符在开关左边，却是最后认的，
+        // 不排的话收纳符左边那些被挤出屏幕的图标会拿屏幕上的开关量偏移，开关右边的时钟反而拿收纳符量
+        anchors.sort { $0.ax.minX < $1.ax.minX }
+        // Control Center 偶尔会额外挂一个和别人窗口重合的元素（没有标识，序号每台机器不一样），
         // 排在最后、对不上也不要紧
         let controlCenter = "com.apple.controlcenter"
         pending.sort { ($0.bundleID == controlCenter ? 1 : 0) < ($1.bundleID == controlCenter ? 1 : 0) }
@@ -449,16 +483,25 @@ struct MenuBarSnapshot {
             let anchor = anchors.first { $0.ax.minX > item.frame.minX } ?? anchors.last
             let offset = anchor.map { $0.window.frame.minX - $0.ax.minX } ?? -7
             let expected = item.frame.minX + offset
-            let window = chain.filter { labels[$0.id] == nil && abs($0.frame.minX - expected) <= 12 }
-                .min { abs($0.frame.minX - expected) < abs($1.frame.minX - expected) }
-            if let window {
-                labels[window.id] = (item.id, item.isMovable)
-            } else if item.bundleID != controlCenter || !item.id.hasSuffix("|#6") {
-                log.debug("对不上窗口：\(item.id, privacy: .public) \(String(describing: item.frame), privacy: .public)")
-                return nil
+            let free = chain.filter { labels[$0.id] == nil }
+            let nearest = free.min { abs($0.frame.minX - expected) < abs($1.frame.minX - expected) }
+            if let nearest, abs(nearest.frame.minX - expected) <= 12 {
+                labels[nearest.id] = (item.id, item.isMovable)
+            } else if item.bundleID != controlCenter || !item.id.hasPrefix("\(controlCenter)|#") {
+                throw MappingFailure("""
+                    \(item.displayName)（\(item.id)）对不上窗口：辅助功能 x=\(Int(item.frame.minX)) 宽 \(Int(item.frame.width))，\
+                    按 \(anchor?.id ?? "默认") 校正 \(Int(offset)) 后应在 x=\(Int(expected))，\
+                    最近的空窗口\(nearest.map { " x=\(Int($0.frame.minX)) 宽 \(Int($0.frame.width))" } ?? "：没有")
+                    """)
             }
         }
         self.init(chain: chain, labels: labels, rowTop: top)
+    }
+
+    /// 对不上窗口的原因：哪一步、哪个图标、位置差多少。写进日志和界面提示，方便定位卡在哪一环
+    struct MappingFailure: Error, CustomStringConvertible {
+        let description: String
+        init(_ description: String) { self.description = description }
     }
 
     private init(chain: [StatusBarRows.Window], labels: [CGWindowID: (id: String, isMovable: Bool)], rowTop: CGFloat) {
