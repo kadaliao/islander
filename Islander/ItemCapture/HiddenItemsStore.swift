@@ -351,7 +351,7 @@ final class HiddenItemsStore {
 
         refreshTask = Task { [scanner, capturer] in
             let result = await scanner.scan(adding: candidates, own: own, isFull: full)
-            let snapshot = MenuBarSnapshot(mapping: result, knownWindows: self.itemWindows)
+            let snapshot = try? MenuBarSnapshot(mapping: result, knownWindows: self.itemWindows)
             if let snapshot {
                 self.itemWindows.merge(snapshot.itemWindows) { _, new in new }
                 self.staleScans = 0

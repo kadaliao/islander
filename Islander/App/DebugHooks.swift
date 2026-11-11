@@ -104,8 +104,8 @@ enum DebugHooks {
             Task {
                 let own = MenuBarScanner.AppInfo(NSRunningApplication.current)
                 let result = await store.scanner.scan(adding: [], own: own, isFull: false)
-                let fresh = MenuBarSnapshot(mapping: result)
-                let withKnown = MenuBarSnapshot(mapping: result, knownWindows: known)
+                let fresh = try? MenuBarSnapshot(mapping: result)
+                let withKnown = try? MenuBarSnapshot(mapping: result, knownWindows: known)
                 for item in result.items {
                     let ax = Int(item.frame.minX)
                     log.notice("""
