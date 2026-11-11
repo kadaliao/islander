@@ -238,6 +238,7 @@ final class MenuBarItemMover {
         defer { hider.endTemporaryReveal() }
 
         var bar = try await settledBar()
+        var moved = false
         for attempt in 1...3 {
             guard let source = bar.entry(itemID) else { throw MoveError.notFound }
             guard source.isMovable else { throw MoveError.immovable }
@@ -253,6 +254,11 @@ final class MenuBarItemMover {
             guard let start = row.grabPoint(for: source.frame),
                   let end = row.dropPoint(between: target, from: source.frame)
             else {
+                // 已经拖进了正确的一侧、只是落到刘海后面抓不起来了：图标确实动了，算成功，不报「没能移动」
+                if moved, bar.section(of: itemID) == destination.section {
+                    log.notice("\(itemID, privacy: .public) 已在正确的一侧，落点在刘海附近、没法再调（第 \(attempt) 次）")
+                    return
+                }
                 log.error("""
                     拖不到：\(itemID, privacy: .public) \(String(describing: source.frame), privacy: .public)，\
                     目标 \(String(describing: target.left?.frame), privacy: .public) | \
@@ -269,6 +275,7 @@ final class MenuBarItemMover {
             let windowBefore = source.windowID.flatMap(Self.windowFrame)
             await Self.drag(from: start, to: end)
             bar = try await barAfterDrag(of: source, windowBefore: windowBefore)
+            if bar.entry(itemID)?.frame != source.frame { moved = true }
         }
         guard bar.section(of: itemID) == destination.section else { throw MoveError.didNotMove }
     }
