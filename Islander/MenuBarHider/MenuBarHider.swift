@@ -234,6 +234,50 @@ final class MenuBarHider: NSObject {
         Self.settledFrames([separatorItem])?.first
     }
 
+    /// 岛民自己几个图标的位置，CG 全局坐标（原点在主屏左上）
+    struct OwnFrames: Sendable {
+        var separator: CGRect?
+        var alwaysHiddenSeparator: CGRect?
+        var collector: CGRect?
+        var toggle: CGRect?
+    }
+
+    /// 从 AppKit 读自己图标的位置：macOS 27 上辅助功能不再报告岛民自己的 AXExtrasMenuBar（issue #1），
+    /// 扫描器读不到分隔符时拿它顶上。还没排好的占位帧不算
+    var ownFrames: OwnFrames {
+        OwnFrames(separator: Self.menuBarFrame(separatorItem),
+                  alwaysHiddenSeparator: Self.menuBarFrame(alwaysHiddenItem),
+                  collector: collectsAll ? Self.menuBarFrame(collectorItem) : nil,
+                  toggle: Self.menuBarFrame(toggleItem))
+    }
+
+    /// AppKit 原样给出的位置，不做筛选：诊断信息用
+    var ownFramesDescription: String {
+        let items: [(String, NSStatusItem?)] = [
+            ("分隔符", separatorItem), ("永远隐藏分隔符", alwaysHiddenItem), ("开关", toggleItem), ("收纳符", collectorItem),
+        ]
+        return items.map { name, item in
+            guard let item else { return "\(name) 没建" }
+            guard let frame = Self.cgFrame(item) else { return "\(name) 没有窗口" }
+            return "\(name) \(MoveDiagnostics.brief(frame))\(Self.menuBarFrame(item) == nil ? "（不在菜单栏上）" : "")"
+        }.joined(separator: " · ")
+    }
+
+    /// 图标窗口的位置，AppKit 坐标（原点在主屏左下）→ CG 坐标（原点在主屏左上）
+    private static func cgFrame(_ item: NSStatusItem?) -> CGRect? {
+        guard let frame = item?.button?.window?.frame, let primary = NSScreen.screens.first else { return nil }
+        return CGRect(x: frame.minX, y: primary.frame.maxY - frame.maxY, width: frame.width, height: frame.height)
+    }
+
+    /// 贴着某块屏幕顶边的才算排好了：新建的图标会先给出 (0,0,w,0)、(0,-30,w,30) 这样的占位帧
+    private static func menuBarFrame(_ item: NSStatusItem?) -> CGRect? {
+        guard let frame = cgFrame(item), frame.width > 0, frame.height > 0,
+              let primaryTop = NSScreen.screens.first?.frame.maxY,
+              NSScreen.screens.contains(where: { abs(frame.midY - (primaryTop - $0.frame.maxY)) <= 50 })
+        else { return nil }
+        return frame
+    }
+
     // MARK: - 显示全部图标
 
     /// "在岛上显示全部图标"：菜单栏上的图标也全收到岛上，菜单栏上不再留一份

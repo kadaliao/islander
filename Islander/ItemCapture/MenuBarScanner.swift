@@ -29,13 +29,15 @@ final class MenuBarScanner: @unchecked Sendable {
         /// 所有第三方 / 系统图标（不含岛民自己的），按从左到右排序
         let items: [MenuBarItem]
         /// 岛民分隔符的位置；左边的图标就是被隐藏的
-        let separator: CGRect?
+        var separator: CGRect?
         /// "永远隐藏"分隔符的位置，在分隔符更左边；它左边的图标连岛上也不显示
-        let alwaysHiddenSeparator: CGRect?
+        var alwaysHiddenSeparator: CGRect?
         /// "显示全部图标"时开关左边的收纳符，没有这个模式时为 nil
         var collector: CGRect? = nil
         /// 岛民开关的位置，用来探测每块屏幕菜单栏的深浅
-        let toggle: CGRect?
+        var toggle: CGRect?
+        /// 岛民自己图标的位置不是辅助功能报告的，是从 AppKit 读的
+        var ownFramesFromAppKit = false
         /// 扫描结束时的菜单栏窗口快照
         let rows: StatusBarRows
         let isFull: Bool
@@ -66,11 +68,24 @@ final class MenuBarScanner: @unchecked Sendable {
 
     /// 扫描已知有图标的 App，再加上 `extra`（全量扫描时传入所有运行中的 App）
     func scan(adding extra: [AppInfo], own: AppInfo, isFull: Bool) async -> Result {
-        await withCheckedContinuation { continuation in
+        var result = await withCheckedContinuation { continuation in
             queue.async {
                 continuation.resume(returning: self.scanOnQueue(extra: extra, own: own, isFull: isFull))
             }
         }
+        // macOS 27 上辅助功能不报告岛民自己的图标（issue #1），没有分隔符就分不出哪边是藏起来的：
+        // 改从 AppKit 读自己图标窗口的位置。辅助功能读得到时不动它
+        if result.separator == nil {
+            let frames = await MainActor.run { MenuBarHider.shared.ownFrames }
+            if let separator = frames.separator {
+                result.separator = separator
+                result.alwaysHiddenSeparator = result.alwaysHiddenSeparator ?? frames.alwaysHiddenSeparator
+                result.collector = result.collector ?? frames.collector
+                result.toggle = result.toggle ?? frames.toggle
+                result.ownFramesFromAppKit = true
+            }
+        }
+        return result
     }
 
     func forget(pid: pid_t) {

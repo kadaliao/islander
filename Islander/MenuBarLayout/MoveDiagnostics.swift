@@ -86,6 +86,8 @@ enum MoveDiagnostics {
             分隔符 \(result.separator.map(brief) ?? "读不到") · 永远隐藏分隔符 \(result.alwaysHiddenSeparator.map(brief) ?? "读不到") · \
             开关 \(result.toggle.map(brief) ?? "读不到") · 收纳符 \(result.collector.map(brief) ?? "无")
             """)
+        lines.append("岛民图标的位置来自：\(result.ownFramesFromAppKit ? "AppKit（辅助功能里读不到）" : "辅助功能")")
+        lines.append("AppKit 报告的岛民图标：\(MenuBarHider.shared.ownFramesDescription)")
         for item in result.items {
             lines.append("  \(item.id) \(brief(item.frame)) 窗口 \(item.windowID.map(String.init) ?? "无")\(item.isMovable ? "" : " 固定")")
         }
