@@ -47,6 +47,8 @@ final class MenuBarItemMover {
         case immovable
         /// 图标和窗口对不上（附带原因），定向事件发不出去；退回真实拖动也没成功时报给用户
         case unmapped(String)
+        /// 辅助功能里读不到岛民自己的分隔符，分不出哪边是藏起来的
+        case ownItemsMissing
         case blocked
         case didNotMove
 
@@ -60,6 +62,8 @@ final class MenuBarItemMover {
                 "这是系统固定的图标，不能移动。"
             case .unmapped(let reason):
                 "没能移动这个图标：菜单栏上的图标和窗口对不上，改用拖动也没成功。\n详情：\(reason)"
+            case .ownItemsMissing:
+                "没能移动这个图标：岛民读不到自己放在菜单栏上的分隔符。"
             case .blocked, .didNotMove:
                 "没能移动这个图标，请再试一次。"
             }
@@ -71,20 +75,29 @@ final class MenuBarItemMover {
     var isMoving: Bool { movingItemID != nil }
     /// 上一次移动失败的原因，界面显示用
     var lastError: String?
+    /// 上一次移动每一步的经过，写进诊断信息
+    private(set) var trail: [String] = []
 
     private init() {}
+
+    private func note(_ step: String) {
+        trail.append(step)
+        log.notice("\(step, privacy: .public)")
+    }
 
     /// 把图标移到指定位置。失败时把原因写进 `lastError`
     @discardableResult
     func move(_ itemID: String, to destination: Destination) async -> Bool {
         guard !isMoving else { return false }
         lastError = nil
+        trail = ["移动 \(itemID) → \(destination.section)"]
         do {
             try await performMove(itemID, to: destination)
             HiddenItemsStore.shared.setAlwaysHidden(itemID, destination.section == .alwaysHidden)
             return true
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            trail.append("失败：\(error)")
             log.error("移动 \(itemID, privacy: .public) 失败：\(self.lastError ?? "", privacy: .public)")
             return false
         }
@@ -113,18 +126,22 @@ final class MenuBarItemMover {
         var unmapped: String?
         do {
             if try await moveWithTargetedEvents(itemID, to: destination) { return }
-            log.notice("定向事件没起作用，改用真实拖动：\(itemID, privacy: .public)")
+            note("定向事件没起作用，改用真实拖动")
         } catch MoveError.unmapped(let reason) {
-            log.notice("对不上窗口，改用真实拖动：\(itemID, privacy: .public)")
+            note("对不上窗口，改用真实拖动：\(reason)")
             unmapped = reason
+        } catch MoveError.notFound {
+            // 对照表建起来了、却没给这个图标认到窗口：拖动用不着窗口，还有机会成功
+            note("窗口对照表里没有这个图标，改用真实拖动")
         }
         do {
             try await moveByDragging(itemID, to: destination)
         } catch let error as MoveError {
-            // 两条路都没走通：报出对不上窗口的原因，才看得出卡在哪一环。找不到、不能动这类明确的原因照常报
+            note("真实拖动没成功：\(error)")
+            // 两条路都没走通：报出对不上窗口的原因，才看得出卡在哪一环。不能动这类明确的原因照常报
             guard let unmapped else { throw error }
             switch error {
-            case .blocked, .didNotMove: throw MoveError.unmapped(unmapped)
+            case .blocked, .didNotMove, .notFound: throw MoveError.unmapped(unmapped)
             default: throw error
             }
         }
@@ -138,7 +155,10 @@ final class MenuBarItemMover {
         var bar = try await windowBar()
         var moved = false
         for attempt in 1...3 {
-            guard let source = bar.entry(itemID), let window = source.windowID else { throw MoveError.notFound }
+            guard let source = bar.entry(itemID), let window = source.windowID else {
+                note("定向第 \(attempt) 次：对照表里没有这个图标（窗口 \(bar.entries.count) 个）")
+                throw MoveError.notFound
+            }
             guard source.isMovable else { throw MoveError.immovable }
             let target = bar.neighbors(for: destination, moving: itemID)
             if bar.isPlaced(itemID, between: target) {
@@ -162,6 +182,7 @@ final class MenuBarItemMover {
                 定向移动 \(itemID, privacy: .public) → \(target.left?.id ?? "-", privacy: .public) | \
                 \(target.right?.id ?? "-", privacy: .public)（第 \(attempt) 次）
                 """)
+            trail.append("定向第 \(attempt) 次：图标 \(MoveDiagnostics.brief(source.frame)) → x=\(Int(anchor.point.x))")
             NSCursor.hide()
             await Self.postTargetedMove(window: window, pid: source.ownerPID, start: source.frame.center,
                                         end: anchor.point, endWindow: anchor.window)
@@ -171,7 +192,10 @@ final class MenuBarItemMover {
             bar = after
         }
         if bar.section(of: itemID) == destination.section, moved { return true }
-        if moved { throw MoveError.didNotMove }
+        if moved {
+            note("定向事件让图标动了，但没到目标那一区")
+            throw MoveError.didNotMove
+        }
         return false
     }
 
@@ -190,8 +214,6 @@ final class MenuBarItemMover {
             }
             try? await Task.sleep(for: .milliseconds(150))
         }
-        // 用 notice：用户抓日志时 debug 级别的看不到
-        log.notice("图标和窗口对不上：\(reason, privacy: .public)")
         throw MoveError.unmapped(reason)
     }
 
@@ -240,7 +262,10 @@ final class MenuBarItemMover {
         var bar = try await settledBar()
         var moved = false
         for attempt in 1...3 {
-            guard let source = bar.entry(itemID) else { throw MoveError.notFound }
+            guard let source = bar.entry(itemID) else {
+                note("拖动第 \(attempt) 次：扫描结果里没有这个图标（共 \(bar.entries.count) 个）")
+                throw MoveError.notFound
+            }
             guard source.isMovable else { throw MoveError.immovable }
             let target = bar.neighbors(for: destination, moving: itemID)
             if bar.isPlaced(itemID, between: target) {
@@ -259,11 +284,11 @@ final class MenuBarItemMover {
                     log.notice("\(itemID, privacy: .public) 已在正确的一侧，落点在刘海附近、没法再调（第 \(attempt) 次）")
                     return
                 }
-                log.error("""
-                    拖不到：\(itemID, privacy: .public) \(String(describing: source.frame), privacy: .public)，\
-                    目标 \(String(describing: target.left?.frame), privacy: .public) | \
-                    \(String(describing: target.right?.frame), privacy: .public)，\
-                    屏幕 \(String(describing: row.screen), privacy: .public) 刘海 \(String(describing: row.notch), privacy: .public)
+                note("""
+                    拖动第 \(attempt) 次拖不到：图标 \(MoveDiagnostics.brief(source.frame))，\
+                    目标 \(target.left.map { MoveDiagnostics.brief($0.frame) } ?? "-") | \
+                    \(target.right.map { MoveDiagnostics.brief($0.frame) } ?? "-")，\
+                    屏幕 \(MoveDiagnostics.brief(row.screen)) 刘海 \(row.notch.map { "\(Int($0.lowerBound))…\(Int($0.upperBound))" } ?? "无")
                     """)
                 throw MoveError.blocked
             }
@@ -272,12 +297,16 @@ final class MenuBarItemMover {
                 拖动 \(itemID, privacy: .public) → \(target.left?.id ?? "-", privacy: .public) | \
                 \(target.right?.id ?? "-", privacy: .public)，\(Int(start.x)) → \(Int(end.x))（第 \(attempt) 次）
                 """)
+            trail.append("拖动第 \(attempt) 次：\(Int(start.x)) → \(Int(end.x))，图标 \(MoveDiagnostics.brief(source.frame))")
             let windowBefore = source.windowID.flatMap(Self.windowFrame)
             await Self.drag(from: start, to: end)
             bar = try await barAfterDrag(of: source, windowBefore: windowBefore)
             if bar.entry(itemID)?.frame != source.frame { moved = true }
         }
-        guard bar.section(of: itemID) == destination.section else { throw MoveError.didNotMove }
+        guard bar.section(of: itemID) == destination.section else {
+            note("拖了 3 次，图标\(moved ? "动过但没到目标那一区" : "一动没动")，现在 \(bar.entry(itemID).map { MoveDiagnostics.brief($0.frame) } ?? "不见了")")
+            throw MoveError.didNotMove
+        }
     }
 
     /// 拖完之后的菜单栏。辅助功能报告的位置比窗口服务器晚到，拿旧位置判断会以为没拖动、再拖一次，
@@ -315,7 +344,10 @@ final class MenuBarItemMover {
     private func scanBar() async throws -> MenuBarSnapshot {
         let own = MenuBarScanner.AppInfo(NSRunningApplication.current)
         let result = await HiddenItemsStore.shared.scanner.scan(adding: [], own: own, isFull: false)
-        guard let separator = result.separator else { throw MoveError.notFound }
+        guard let separator = result.separator else {
+            note("辅助功能里读不到岛民的分隔符（开关\(result.toggle == nil ? "也读不到" : "读得到")，图标 \(result.items.count) 个）")
+            throw MoveError.ownItemsMissing
+        }
         return MenuBarSnapshot(items: result.items, separator: separator, alwaysHiddenSeparator: result.alwaysHiddenSeparator,
                    toggle: result.toggle)
     }

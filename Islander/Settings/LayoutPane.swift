@@ -18,6 +18,7 @@ struct LayoutPane: View {
     private var activeDropTarget: DropTarget? { draggingID == nil ? nil : dropTarget }
     /// 每个图标的实际宽度，判断落点在它左半边还是右半边
     @State private var chipWidths: [String: CGFloat] = [:]
+    @State private var copiedDiagnostics = false
 
     fileprivate struct DropTarget: Equatable {
         let section: MenuBarItemMover.Section
@@ -220,6 +221,18 @@ struct LayoutPane: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
+            Button(copiedDiagnostics ? "已拷贝" : "拷贝诊断信息") {
+                Task {
+                    let report = await MoveDiagnostics.report()
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(report, forType: .string)
+                    copiedDiagnostics = true
+                    try? await Task.sleep(for: .seconds(2))
+                    copiedDiagnostics = false
+                }
+            }
+            .disabled(mover.isMoving)
+            .help("移动图标不成功时，把这段信息贴给我们。第三方 App 的名字已经换成代号")
             Button("重新读取") { store.refresh(full: true, forceCapture: true) }
                 .disabled(mover.isMoving)
         }

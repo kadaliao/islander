@@ -15,6 +15,7 @@ private let log = Logger(subsystem: "com.kadaliao.islander", category: "debug")
 ///     com.kadaliao.islander.debug.window    object = PNG 路径：把设置窗口截图存下来
 ///     com.kadaliao.islander.debug.move      object = "图标>always / hidden / visible[@放在它前面的图标]"：移动菜单栏图标
 ///     com.kadaliao.islander.debug.layout    打印当前菜单栏布局
+///     com.kadaliao.islander.debug.diagnostics  object = 文件路径：把「拷贝诊断信息」的内容写到文件
 ///     com.kadaliao.islander.debug.showall   object = "on" / "off"：岛上显示全部图标
 ///     com.kadaliao.islander.debug.windows   打印菜单栏图标窗口（编号、位置、标题）
 ///     com.kadaliao.islander.debug.chain     打印每个图标认的是哪个窗口（记着的 / 现在认的 / 合起来认的）
@@ -83,6 +84,13 @@ enum DebugHooks {
             Task {
                 let ok = await MenuBarItemMover.shared.move(item.id, to: destination)
                 log.notice("调试移动 \(item.id, privacy: .public)：\(ok ? "成功" : MenuBarItemMover.shared.lastError ?? "失败", privacy: .public)")
+            }
+        }
+        observe("diagnostics") { path in
+            Task {
+                let report = await MoveDiagnostics.report()
+                try? report.write(toFile: path, atomically: true, encoding: .utf8)
+                log.notice("诊断信息已写到 \(path, privacy: .public)")
             }
         }
         observe("windows") { _ in

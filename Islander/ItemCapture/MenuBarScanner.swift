@@ -94,6 +94,44 @@ final class MenuBarScanner: @unchecked Sendable {
         }
     }
 
+    // MARK: - 诊断
+
+    /// 辅助功能原样报告的内容，不做任何筛选：诊断信息用
+    struct RawApp: Sendable {
+        let info: AppInfo
+        let isOwn: Bool
+        let hasExtrasBar: Bool
+        let children: [RawChild]
+    }
+
+    struct RawChild: Sendable {
+        let index: Int
+        let identifier: String?
+        let role: String?
+        let frame: CGRect?
+    }
+
+    func rawDump(own: AppInfo) async -> [RawApp] {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                var apps = self.knownApps
+                apps[own.pid] = own
+                let dump = apps.values.map { app -> RawApp in
+                    let appElement = AXUIElementCreateApplication(app.pid)
+                    AXUIElementSetMessagingTimeout(appElement, 0.3)
+                    let bar = AX.element(appElement, "AXExtrasMenuBar")
+                    let children = bar.map { AX.elements($0, kAXChildrenAttribute) } ?? []
+                    return RawApp(info: app, isOwn: app.pid == own.pid, hasExtrasBar: bar != nil,
+                                  children: children.enumerated().map { index, child in
+                        RawChild(index: index, identifier: AX.string(child, kAXIdentifierAttribute),
+                                 role: AX.string(child, kAXRoleAttribute), frame: AX.frame(child))
+                    })
+                }
+                continuation.resume(returning: dump)
+            }
+        }
+    }
+
     // MARK: - 扫描（queue 上执行）
 
     /// 同一个图标窗口被两个 App 报告时只留一个：实测 Control Center 会额外挂一个
