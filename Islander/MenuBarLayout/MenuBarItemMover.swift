@@ -212,6 +212,8 @@ final class MenuBarItemMover {
             } catch {
                 reason = "\(error)"
             }
+            // 窗口服务器里根本没有图标窗口（macOS 27）：再等也对不上，直接交给真实拖动
+            if result.rows.windows.isEmpty { break }
             try? await Task.sleep(for: .milliseconds(150))
         }
         throw MoveError.unmapped(reason)
@@ -348,8 +350,12 @@ final class MenuBarItemMover {
             note("辅助功能里读不到岛民的分隔符（开关\(result.toggle == nil ? "也读不到" : "读得到")，图标 \(result.items.count) 个）")
             throw MoveError.ownItemsMissing
         }
+        if result.ownFramesFromAppKit {
+            let step = "辅助功能里读不到岛民的分隔符，改用 AppKit 报告的位置：\(MoveDiagnostics.brief(separator))"
+            if !trail.contains(step) { note(step) }
+        }
         return MenuBarSnapshot(items: result.items, separator: separator, alwaysHiddenSeparator: result.alwaysHiddenSeparator,
-                   toggle: result.toggle)
+                   toggle: result.toggle, hasItemWindows: !result.rows.windows.isEmpty)
     }
 
     // MARK: - 合成 ⌘ 拖动
@@ -443,6 +449,8 @@ struct MenuBarSnapshot {
     let separator: CGRect
     let alwaysHiddenSeparator: CGRect?
     private let itemCount: Int
+    /// 窗口服务器里有没有图标窗口：macOS 27 上没有，排没排好就不能拿窗口核对
+    private var hasItemWindows = true
     /// 按窗口建的快照：这一行菜单栏的顶边，以及每个窗口是哪个图标
     private var rowTop: CGFloat?
     private var labels: [CGWindowID: (id: String, isMovable: Bool)] = [:]
@@ -605,7 +613,9 @@ struct MenuBarSnapshot {
         return labels.keys.allSatisfy(present.contains)
     }
 
-    init(items: [MenuBarItem], separator: CGRect, alwaysHiddenSeparator: CGRect?, toggle: CGRect?) {
+    init(items: [MenuBarItem], separator: CGRect, alwaysHiddenSeparator: CGRect?, toggle: CGRect?,
+         hasItemWindows: Bool = true) {
+        self.hasItemWindows = hasItemWindows
         var entries = items.map { Entry(id: $0.id, frame: $0.frame, isMovable: $0.isMovable, windowID: $0.windowID) }
         itemCount = items.count
         rowTop = nil
@@ -626,6 +636,7 @@ struct MenuBarSnapshot {
         guard entries.allSatisfy({ $0.frame.minX > screen.minX - 200 && $0.frame.maxX < screen.maxX + 200 }) else {
             return false
         }
+        guard hasItemWindows else { return true }
         // 位置还是旧的时，有的图标报告的位置不在任何图标窗口里，或者两个图标落进同一个窗口
         let windows = entries.compactMap(\.windowID)
         return windows.count == itemCount && Set(windows).count == windows.count
