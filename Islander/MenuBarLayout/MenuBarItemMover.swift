@@ -51,6 +51,10 @@ final class MenuBarItemMover {
         case ownItemsMissing
         case blocked
         case didNotMove
+        /// 辅助功能报的图标位置互相叠在一起，还是旧的：照着抓会拖走别的图标
+        case stalePositions
+        /// 拖动抓到的是别的图标（附带它的名字），再拖只会接着拖错
+        case grabbedOther(String)
 
         var errorDescription: String? {
             switch self {
@@ -66,6 +70,10 @@ final class MenuBarItemMover {
                 "没能移动这个图标：岛民读不到自己放在菜单栏上的分隔符。"
             case .blocked, .didNotMove:
                 "没能移动这个图标，请再试一次。"
+            case .stalePositions:
+                "没能移动这个图标：系统报告的图标位置还没更新，照着拖会拖错图标。请过几分钟再试。"
+            case .grabbedOther(let name):
+                "拖动时抓到的是「\(name)」，不是这个图标：系统报告的图标位置还没更新。已经停下，请看看「\(name)」现在在哪一排，过几分钟再试。"
             }
         }
     }
@@ -302,8 +310,20 @@ final class MenuBarItemMover {
             trail.append("拖动第 \(attempt) 次：\(Int(start.x)) → \(Int(end.x))，图标 \(MoveDiagnostics.brief(source.frame))")
             let windowBefore = source.windowID.flatMap(Self.windowFrame)
             await Self.drag(from: start, to: end)
+            let before = bar
             bar = try await barAfterDrag(of: source, windowBefore: windowBefore)
-            if bar.entry(itemID)?.frame != source.frame { moved = true }
+            if bar.entry(itemID)?.frame != source.frame {
+                moved = true
+            } else if let other = bar.farthestMoved(since: before, excluding: itemID, beyond: 80) {
+                // 这个图标没动，别的图标却挪了老远：抓的地方其实是别的图标（位置是旧的）。
+                // 再拖还是抓在同一个地方，只会接着拖错，停下
+                note("""
+                    拖动第 \(attempt) 次抓到了别的图标：\(other) \
+                    \(before.entry(other).map { MoveDiagnostics.brief($0.frame) } ?? "-") → \
+                    \(bar.entry(other).map { MoveDiagnostics.brief($0.frame) } ?? "-")
+                    """)
+                throw MoveError.grabbedOther(Self.displayName(of: other))
+            }
         }
         guard bar.section(of: itemID) == destination.section else {
             note("拖了 3 次，图标\(moved ? "动过但没到目标那一区" : "一动没动")，现在 \(bar.entry(itemID).map { MoveDiagnostics.brief($0.frame) } ?? "不见了")")
@@ -329,6 +349,12 @@ final class MenuBarItemMover {
         StatusBarRows.current().windows.first { $0.id == id }?.frame
     }
 
+    /// 报错时给人看的图标名字
+    private static func displayName(of id: String) -> String {
+        if id.hasPrefix("islander|") { return "岛民自己的图标" }
+        return HiddenItemsStore.shared.allItems.first { $0.id == id }?.source.displayName ?? id
+    }
+
     /// 露出隐藏的图标后等菜单栏排好：两条分隔符都变回细线、所有图标都回到屏幕附近、
     /// 每个图标报告的位置都落在一个图标窗口里，并且连续两次扫描位置一致。
     /// 辅助功能先报告分隔符的新宽度，图标的新位置要晚一些才到，只看宽度会拿到还在屏幕外的旧位置
@@ -340,7 +366,17 @@ final class MenuBarItemMover {
             previous = bar
             try? await Task.sleep(for: .milliseconds(100))
         }
-        return try await scanBar()
+        let bar = try await scanBar()
+        // 图标还叠在一起：位置是旧的，照着抓会拖走别的图标。macOS 27 上连续移动后会这样，
+        // 两次扫描一模一样、几分钟后才自己恢复，等不到，宁可不拖（issue #1）
+        if case let (a, b)? = bar.overlap {
+            note("""
+                辅助功能报的位置叠在一起：\(a) \(bar.entry(a).map { MoveDiagnostics.brief($0.frame) } ?? "-") 和 \
+                \(b) \(bar.entry(b).map { MoveDiagnostics.brief($0.frame) } ?? "-")，不拖
+                """)
+            throw MoveError.stalePositions
+        }
+        return bar
     }
 
     private func scanBar() async throws -> MenuBarSnapshot {
@@ -451,6 +487,8 @@ struct MenuBarSnapshot {
     private let itemCount: Int
     /// 窗口服务器里有没有图标窗口：macOS 27 上没有，排没排好就不能拿窗口核对
     private var hasItemWindows = true
+    /// 没有图标窗口可核对时，叠在一起的两个第三方图标：说明辅助功能报的位置是旧的
+    private(set) var overlap: (String, String)?
     /// 按窗口建的快照：这一行菜单栏的顶边，以及每个窗口是哪个图标
     private var rowTop: CGFloat?
     private var labels: [CGWindowID: (id: String, isMovable: Bool)] = [:]
@@ -627,6 +665,21 @@ struct MenuBarSnapshot {
         self.entries = entries.sorted { $0.frame.minX < $1.frame.minX }
         self.separator = separator
         self.alwaysHiddenSeparator = alwaysHiddenSeparator
+        if !hasItemWindows { overlap = Self.overlappingPair(in: items, row: RowGeometry(containing: separator)) }
+    }
+
+    /// macOS 27 上连续移动后，辅助功能会报出叠在一起的旧位置（实测三个图标的左边缘挤在 6pt 里），
+    /// 照着抓会拖走正坐在那里的别的图标。位置正常时相邻图标也会交叠 2pt 左右，所以叠到 8pt 才算。
+    /// 只看拖得到的第三方图标：岛民自己的位置是 AppKit 给的，不会旧；
+    /// 刘海左边、屏幕外的图标不会去抓，被系统挤压时叠在一起也不一定是旧位置
+    private static func overlappingPair(in items: [MenuBarItem], row: RowGeometry) -> (String, String)? {
+        let others = items.filter { $0.bundleID?.hasPrefix("com.apple.") != true && row.isReachable($0.frame.midX) }
+        for (index, a) in others.enumerated() {
+            for b in others[(index + 1)...] where a.frame.intersection(b.frame).width >= 8 {
+                return (a.id, b.id)
+            }
+        }
+        return nil
     }
 
     /// 两条分隔符都是细线了，所有图标都在菜单栏上排开（没有被挤到屏幕外很远的）
@@ -636,7 +689,8 @@ struct MenuBarSnapshot {
         guard entries.allSatisfy({ $0.frame.minX > screen.minX - 200 && $0.frame.maxX < screen.maxX + 200 }) else {
             return false
         }
-        guard hasItemWindows else { return true }
+        // 没有图标窗口可核对（macOS 27）：位置是旧的时图标会叠在一起
+        guard hasItemWindows else { return overlap == nil }
         // 位置还是旧的时，有的图标报告的位置不在任何图标窗口里，或者两个图标落进同一个窗口
         let windows = entries.compactMap(\.windowID)
         return windows.count == itemCount && Set(windows).count == windows.count
@@ -645,6 +699,16 @@ struct MenuBarSnapshot {
     var frames: [CGRect] { entries.map(\.frame) }
 
     func entry(_ id: String) -> Entry? { entries.first { $0.id == id } }
+
+    /// 和之前的快照比，除了 `id` 以外挪得最远、并且超过 `distance` 的图标。
+    /// 拖的图标没动时别的图标本不该动；宽度会变的图标（网速、时钟）只会让旁边的挪一点，被抓错拖走的才挪得远
+    func farthestMoved(since before: MenuBarSnapshot, excluding id: String, beyond distance: CGFloat) -> String? {
+        let moves = entries.compactMap { entry -> (id: String, distance: CGFloat)? in
+            guard entry.id != id, let old = before.entry(entry.id) else { return nil }
+            return (entry.id, abs(entry.frame.midX - old.frame.midX))
+        }
+        return moves.filter { $0.distance > distance }.max { $0.distance < $1.distance }?.id
+    }
 
     func section(of id: String) -> MenuBarItemMover.Section? {
         guard let entry = entry(id) else { return nil }
@@ -728,7 +792,7 @@ private struct RowGeometry {
     }
 
     /// 有刘海的屏幕上只有刘海右边能拖：刘海后面抓不起来；刘海左边挤着的图标窗口被系统压扁了，拖了也没反应
-    private func isReachable(_ x: CGFloat) -> Bool {
+    func isReachable(_ x: CGFloat) -> Bool {
         guard x > screen.minX + 1, x < screen.maxX - 1 else { return false }
         if let notch { return x > notch.upperBound }
         return true
@@ -739,7 +803,8 @@ private struct RowGeometry {
         isReachable(frame.midX) ? CGPoint(x: frame.midX, y: frame.midY) : nil
     }
 
-    /// 松手的位置：两个邻居之间空隙的中点；被刘海挡住时在有效范围里找最近的可达点
+    /// 松手的位置：两个邻居之间空隙的中点；空隙很宽时贴着要越过的那个邻居；
+    /// 被刘海挡住时在有效范围里找最近的可达点
     func dropPoint(between target: (left: MenuBarSnapshot.Entry?, right: MenuBarSnapshot.Entry?), from source: CGRect) -> CGPoint? {
         let left = target.left?.frame
         let right = target.right?.frame
@@ -747,7 +812,15 @@ private struct RowGeometry {
 
         let preferred: CGFloat
         switch (left, right) {
-        case let (l?, r?): preferred = (l.maxX + r.minX) / 2
+        case let (l?, r?):
+            let middle = (l.maxX + r.minX) / 2
+            // 空隙超过一个图标宽：macOS 27 上第一次藏图标时左邻居被挤到刘海左边，中点落在刘海后面，
+            // 往两边找 60pt 也够不着刘海右边，每次都拖不到（issue #1）。往左拖贴着右邻居，往右拖贴着左邻居
+            if r.minX - l.maxX > 40 {
+                preferred = source.midX > middle ? r.minX - 4 : l.maxX + 4
+            } else {
+                preferred = middle
+            }
         case let (l?, nil): preferred = l.maxX + 4
         case let (nil, r?): preferred = r.minX - 4
         case (nil, nil): return nil
