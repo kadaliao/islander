@@ -168,6 +168,12 @@ final class ClickForwarder {
         if opened.isEmpty {
             opened = await InterfaceWatcher.waitUntilOpened(pids: pids, baseline: baseline, timeout: .seconds(1))
         }
+        if opened.isEmpty, reveal, #available(macOS 27, *) {
+            // macOS 27 上收进「«」的图标，按下去回成功，有的 App 却什么都不弹（实测滴答清单）。
+            // 露出来再点又会把所有藏起来的图标一起露出来：和按不下去的一样，改为打开这个 App
+            log.notice("\(item.id, privacy: .public) 按下以后什么都没弹出来")
+            await Self.openApp(of: item)
+        }
         if !opened.isEmpty {
             await InterfaceWatcher.waitUntilClosed(pids: pids, opened: opened)
         }
@@ -200,7 +206,7 @@ final class ClickForwarder {
         configuration.activates = true
         do {
             try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
-            log.info("\(item.id, privacy: .public) 改为打开 App：\(url.lastPathComponent, privacy: .public)")
+            log.notice("\(item.id, privacy: .public) 改为打开 App：\(url.lastPathComponent, privacy: .public)")
         } catch {
             log.error("\(item.id, privacy: .public) 打开 App 失败：\(error.localizedDescription, privacy: .public)")
         }
