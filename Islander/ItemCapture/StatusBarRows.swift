@@ -66,10 +66,14 @@ struct StatusBarRows: Sendable {
         return result
     }
 
-    /// 包含某点的图标窗口（排除隐藏状态下超宽的分隔符）
+    /// 包含某点的图标窗口（排除隐藏状态下超宽的分隔符）。
+    ///
+    /// 只认菜单栏那么高的：别的 App 也会在状态栏这一层挂窗口。实测 macOS 27 上点了收进「«」的滴答清单，
+    /// 它在图标位置建了一个 392×634、不显示的下拉面板，盖住菜单栏上一大段，那一段的图标全被认成同一个窗口、
+    /// 去重后只剩一个（23 个图标扫出 16 个），还让移动图标以为有图标窗口可核对、又等满 5 秒
     func window(containing point: CGPoint) -> Window? {
         windows
-            .filter { $0.frame.contains(point) && $0.frame.width < 1000 }
+            .filter { $0.frame.contains(point) && $0.frame.width < 1000 && $0.frame.height <= 40 }
             .min { $0.frame.width < $1.frame.width }
     }
 
