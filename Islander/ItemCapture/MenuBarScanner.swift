@@ -48,16 +48,20 @@ final class MenuBarScanner: @unchecked Sendable {
         /// 要有图标真的落进某个窗口才算
         var hasItemWindows: Bool { items.contains { $0.windowID != nil } }
 
-        /// 被隐藏的图标（含永远隐藏的）：分隔符左边、和它在同一行
+        /// 被隐藏的图标（含永远隐藏的）：分隔符左边、和它在同一行。
+        ///
+        /// 按左边缘比，不要求整个图标都在分隔符左边：macOS 27 上隐藏状态下辅助功能报的不是屏幕上的真实位置，
+        /// 刚移进来的图标会和分隔符叠在一起（实测右边缘越过分隔符 14pt），按右边缘比就会一直算成留在菜单栏上，
+        /// 设置里要等下一次移动才显示到岛上。分隔符右边的图标左边缘总在分隔符左边缘的右边，不会算错
         var hiddenItems: [MenuBarItem] {
             guard let separator else { return [] }
-            return items.filter { $0.frame.maxX <= separator.minX + 1 && abs($0.frame.midY - separator.midY) < 12 }
+            return items.filter { $0.frame.minX < separator.minX && abs($0.frame.midY - separator.midY) < 12 }
         }
 
         /// 永远隐藏的图标：两条分隔符都在它右边
         var alwaysHiddenItems: [MenuBarItem] {
             guard let alwaysHiddenSeparator else { return [] }
-            return hiddenItems.filter { $0.frame.maxX <= alwaysHiddenSeparator.minX + 1 }
+            return hiddenItems.filter { $0.frame.minX < alwaysHiddenSeparator.minX }
         }
     }
 
