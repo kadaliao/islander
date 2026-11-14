@@ -43,6 +43,11 @@ final class MenuBarScanner: @unchecked Sendable {
         let isFull: Bool
         let duration: TimeInterval
 
+        /// 菜单栏图标有没有各自的窗口（macOS 26 有，macOS 27 整条菜单栏归 MenuBarAgent 的一个大窗口，没有）。
+        /// 不能只看状态栏层有没有窗口：别的 App（截图、键盘工具、Xcode……）也会在这一层挂浮动窗口，
+        /// 要有图标真的落进某个窗口才算
+        var hasItemWindows: Bool { items.contains { $0.windowID != nil } }
+
         /// 被隐藏的图标（含永远隐藏的）：分隔符左边、和它在同一行
         var hiddenItems: [MenuBarItem] {
             guard let separator else { return [] }

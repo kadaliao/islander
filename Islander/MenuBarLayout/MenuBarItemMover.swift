@@ -221,7 +221,7 @@ final class MenuBarItemMover {
                 reason = "\(error)"
             }
             // 窗口服务器里根本没有图标窗口（macOS 27）：再等也对不上，直接交给真实拖动
-            if result.rows.windows.isEmpty { break }
+            if !result.hasItemWindows { break }
             try? await Task.sleep(for: .milliseconds(150))
         }
         throw MoveError.unmapped(reason)
@@ -284,6 +284,12 @@ final class MenuBarItemMover {
             }
             // 位置不完全对、但已经在正确的一侧，第三次就不再折腾
             if attempt == 3, bar.section(of: itemID) == destination.section { return }
+            // 没指定放在谁前面、已经拖进了正确的一侧：够了。macOS 27 上系统图标中间放不进去，
+            // 照着「这一区最右边」再拖一次也只会落回原处，白等一轮
+            if moved, destination.beforeID == nil, bar.section(of: itemID) == destination.section {
+                log.notice("\(itemID, privacy: .public) 已在正确的一侧（第 \(attempt) 次）")
+                return
+            }
 
             let row = RowGeometry(containing: source.frame)
             guard let start = row.grabPoint(for: source.frame),
@@ -360,13 +366,23 @@ final class MenuBarItemMover {
     /// 辅助功能先报告分隔符的新宽度，图标的新位置要晚一些才到，只看宽度会拿到还在屏幕外的旧位置
     private func settledBar() async throws -> MenuBarSnapshot {
         var previous: MenuBarSnapshot?
-        for _ in 0..<30 {
+        let clock = ContinuousClock()
+        let start = clock.now
+        for round in 0..<30 {
+            let scanStart = clock.now
             let bar = try await scanBar()
-            if bar.isLaidOut, let previous, previous.frames == bar.frames { return bar }
+            let blocker = bar.layoutBlocker
+            let stable = previous?.frames == bar.frames
+            log.debug("排好检查第 \(round) 轮：扫描 \(clock.now - scanStart, privacy: .public)，\(blocker ?? "排好了", privacy: .public)，\(stable ? "和上次一样" : "和上次不同", privacy: .public)")
+            if blocker == nil, stable {
+                log.notice("菜单栏排好了：\(round + 1) 轮，\(clock.now - start, privacy: .public)")
+                return bar
+            }
             previous = bar
             try? await Task.sleep(for: .milliseconds(100))
         }
         let bar = try await scanBar()
+        note("等了 30 轮（\(clock.now - start)）菜单栏还没排好：\(bar.layoutBlocker ?? "前后两次扫描不一致")")
         // 图标还叠在一起：位置是旧的，照着抓会拖走别的图标。macOS 27 上连续移动后会这样，
         // 两次扫描一模一样、几分钟后才自己恢复，等不到，宁可不拖（issue #1）
         if case let (a, b)? = bar.overlap {
@@ -391,7 +407,7 @@ final class MenuBarItemMover {
             if !trail.contains(step) { note(step) }
         }
         return MenuBarSnapshot(items: result.items, separator: separator, alwaysHiddenSeparator: result.alwaysHiddenSeparator,
-                   toggle: result.toggle, hasItemWindows: !result.rows.windows.isEmpty)
+                   toggle: result.toggle, hasItemWindows: result.hasItemWindows)
     }
 
     // MARK: - 合成 ⌘ 拖动
@@ -683,17 +699,25 @@ struct MenuBarSnapshot {
     }
 
     /// 两条分隔符都是细线了，所有图标都在菜单栏上排开（没有被挤到屏幕外很远的）
-    var isLaidOut: Bool {
-        guard separator.width < 100, (alwaysHiddenSeparator?.width ?? 0) < 100 else { return false }
+    var isLaidOut: Bool { layoutBlocker == nil }
+
+    /// 还没排好的原因；nil 表示排好了
+    var layoutBlocker: String? {
+        if separator.width >= 100 { return "分隔符还很长（宽 \(Int(separator.width))）" }
+        if let alwaysHiddenSeparator, alwaysHiddenSeparator.width >= 100 {
+            return "永远隐藏分隔符还很长（宽 \(Int(alwaysHiddenSeparator.width))）"
+        }
         let screen = RowGeometry(containing: separator).screen
-        guard entries.allSatisfy({ $0.frame.minX > screen.minX - 200 && $0.frame.maxX < screen.maxX + 200 }) else {
-            return false
+        if let far = entries.first(where: { !($0.frame.minX > screen.minX - 200 && $0.frame.maxX < screen.maxX + 200) }) {
+            return "\(far.id) 在屏幕外 \(MoveDiagnostics.brief(far.frame))，屏幕 \(MoveDiagnostics.brief(screen))"
         }
         // 没有图标窗口可核对（macOS 27）：位置是旧的时图标会叠在一起
-        guard hasItemWindows else { return overlap == nil }
+        guard hasItemWindows else { return overlap.map { "\($0.0) 和 \($0.1) 叠在一起" } }
         // 位置还是旧的时，有的图标报告的位置不在任何图标窗口里，或者两个图标落进同一个窗口
         let windows = entries.compactMap(\.windowID)
-        return windows.count == itemCount && Set(windows).count == windows.count
+        if windows.count != itemCount { return "\(itemCount - windows.count) 个图标不在任何图标窗口里" }
+        if Set(windows).count != windows.count { return "有两个图标落进同一个窗口" }
+        return nil
     }
 
     var frames: [CGRect] { entries.map(\.frame) }
@@ -744,6 +768,9 @@ struct MenuBarSnapshot {
                     $0 > separatorIndex && (others[$0].id == Self.toggleID || others[$0].id == Self.collectorID)
                 }
                     ?? others.indices.first { $0 > separatorIndex && !others[$0].isMovable }
+                    // macOS 27 上时钟、控制中心归 MenuBarAgent，标识认不出来：放在最右边那个（时钟）左边，
+                    // 不要放到时钟右边，那里拖不过去
+                    ?? (others.count - 1 > separatorIndex ? others.count - 1 : nil)
             }
         }()
 
