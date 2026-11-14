@@ -31,8 +31,17 @@ final class MenuBarHider: NSObject {
     /// 以前版本存的"图标藏没藏起来"，现在一直藏着，启动时清掉
     private static let legacyHiddenKey = "menuBarItemsHidden"
 
-    /// 隐藏时分隔符的长度：足够把它左边的所有图标挤出任何屏幕
-    private static let hidingLength: CGFloat = 10_000
+    /// 隐藏时分隔符的长度：足够把它左边的所有图标挤出任何屏幕。
+    ///
+    /// macOS 27 的菜单栏由 MenuBarAgent 排版，不再把放不下的图标挤到屏幕外，而是收进一个「«」溢出按钮；
+    /// 但单个图标比半个屏幕还宽时，系统直接丢掉它、其他图标照常排，什么都藏不住（实测 2560pt 宽的屏幕上
+    /// 长度 1260 能藏、1275 就不行；图标实际宽度是长度 + 16）。所以 macOS 27 上取「最窄屏幕的一半」再留点余量：
+    /// 窄屏上不会被丢掉，宽屏上通常也足够把左边的图标挤进溢出按钮
+    private static var hidingLength: CGFloat {
+        guard #available(macOS 27, *) else { return 10_000 }
+        let narrowest = NSScreen.screens.map(\.frame.width).min() ?? 1440
+        return max(200, (narrowest / 2).rounded(.down) - 16 - 8)
+    }
     private static let separatorLength: CGFloat = 12
 
     /// 点击岛上图标、调整布局期间，临时把图标露出来
@@ -58,6 +67,7 @@ final class MenuBarHider: NSObject {
     @ObservationIgnored private var contextMenu: NSMenu?
     @ObservationIgnored private var ignoresToggleClicksUntil = Date.distantPast
     @ObservationIgnored private var collectorItem: NSStatusItem?
+    @ObservationIgnored private var screenObserver: NSObjectProtocol?
     /// 上一次由我们写下的收纳符首选位置
     @ObservationIgnored private var collectorPosition: CGFloat?
 
@@ -93,6 +103,12 @@ final class MenuBarHider: NSObject {
         createSeparator()
         createAlwaysHiddenSeparator()
         applyLengths()
+        // 隐藏长度按屏幕宽度算（macOS 27），接上 / 拔掉显示器、改分辨率后重新算
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { MenuBarHider.shared.applyLengths() }
+        }
 
         // 新建的图标要过一会儿才排进菜单栏，排好后再检查位置、把图标藏起来
         Task {
