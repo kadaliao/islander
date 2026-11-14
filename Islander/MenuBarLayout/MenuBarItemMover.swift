@@ -473,10 +473,12 @@ final class MenuBarItemMover {
 
 extension MenuBarItem {
     /// 系统固定的图标：时钟、控制中心，以及用麦克风 / 摄像头时出现的隐私指示
+    /// 按图标标识认，不看属于哪个进程：macOS 26 上归 Control Center，macOS 27 上归 MenuBarAgent
     var isMovable: Bool {
-        !["com.apple.controlcenter|com.apple.menuextra.clock",
-          "com.apple.controlcenter|com.apple.menuextra.controlcenter",
-          "com.apple.controlcenter|com.apple.menuextra.audiovideo"].contains(id)
+        guard bundleID == "com.apple.controlcenter" || bundleID == "com.apple.MenuBarAgent" else { return true }
+        return !["com.apple.menuextra.clock",
+                 "com.apple.menuextra.controlcenter",
+                 "com.apple.menuextra.audiovideo"].contains { id.hasSuffix("|\($0)") }
     }
 }
 

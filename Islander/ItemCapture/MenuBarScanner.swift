@@ -216,6 +216,20 @@ final class MenuBarScanner: @unchecked Sendable {
         return rowTops.contains { abs(frame.midY - $0) <= 50 }
     }
 
+    /// macOS 27 上系统图标（时钟、控制中心、Wi‑Fi、电池……）归 MenuBarAgent，每个都包在一个没有标识的
+    /// AXGroup（AXHostingView）里，真正的菜单栏图标是它唯一的子元素，标识照旧是 com.apple.menuextra.*。
+    /// 不拆开的话只认得出进程名，设置里一排「MenuBarAgent」，时钟、控制中心也认不出是固定的
+    private static func unwrappedMenuExtra(_ element: AXUIElement) -> AXUIElement? {
+        guard AX.string(element, kAXRoleAttribute) == kAXGroupRole as String,
+              AX.string(element, kAXIdentifierAttribute) == nil
+        else { return nil }
+        let children = AX.elements(element, kAXChildrenAttribute)
+        guard children.count == 1, let inner = children.first,
+              AX.string(inner, kAXRoleAttribute) == kAXMenuBarItemRole as String
+        else { return nil }
+        return inner
+    }
+
     private func scanOnce(extra: [AppInfo], own: AppInfo, isFull: Bool, start: Date) -> Result {
         var apps = knownApps
         apps[own.pid] = own
@@ -244,9 +258,11 @@ final class MenuBarScanner: @unchecked Sendable {
                 knownApps[app.pid] = app
             }
 
-            for (index, child) in children.enumerated() {
+            for (index, wrapper) in children.enumerated() {
                 // Control Center 会挂一些 0 尺寸的占位元素
-                guard let frame = AX.frame(child), frame.width > 0, frame.height > 0 else { continue }
+                guard let frame = AX.frame(wrapper), frame.width > 0, frame.height > 0 else { continue }
+                // 位置按外层算（和其他图标一样占满菜单栏这一格），标识、描述、按下都用里面那一个
+                let child = Self.unwrappedMenuExtra(wrapper) ?? wrapper
                 let identifier = AX.string(child, kAXIdentifierAttribute)
 
                 if app.pid == own.pid {
