@@ -107,8 +107,19 @@ final class ClickForwarder {
             return
         }
         let pids = Self.relatedProcesses(of: item)
-        let baseline = await InterfaceWatcher.windows(of: pids)
-        await press(item, at: itemFrame)
+        var revealed = false
+        defer { if revealed { hider.endTemporaryReveal() } }
+        var baseline = await InterfaceWatcher.windows(of: pids)
+        // 藏着的图标不能信它报的位置：macOS 27 上收进「«」的图标照样报一个屏幕上的位置，在那里点会点到别处
+        if !(await press(item, at: itemFrame, onScreen: !reveal && bars.contains { $0.holds(itemFrame) })) {
+            // 按不下去、也没有窗口可发定向点击（macOS 27），图标又藏着：先露出来，再在它身上真点一下
+            if reveal, let frame = await revealItem(item, alwaysHidden: alwaysHidden, in: bars) {
+                revealed = true
+                itemFrame = frame
+                baseline = await InterfaceWatcher.windows(of: pids)
+                await press(item, at: itemFrame, onScreen: true)
+            }
+        }
         watchedItemID = item.id
         defer { watchedItemID = nil }
 
@@ -120,14 +131,12 @@ final class ClickForwarder {
         }
 
         // 图标在屏幕外，弹出来的东西挪不动、也不在屏幕上：把图标露出来
-        var revealed = false
-        defer { if revealed { hider.endTemporaryReveal() } }
         let itemOnScreen = bars.contains { $0.holds(itemFrame) }
         if !moved, !itemOnScreen, !opened.isEmpty {
             let visible = InterfaceWatcher.placements(of: opened).values.filter { placement in
                 placement.frame.width > 8 && bars.contains { $0.screen.intersects(placement.frame) }
             }
-            if visible.isEmpty {
+            if visible.isEmpty, !revealed {
                 log.info("\(item.id, privacy: .public) 在屏幕外打不开，先露出来")
                 revealed = true
                 hider.beginTemporaryReveal(includingAlwaysHidden: alwaysHidden)
@@ -141,7 +150,7 @@ final class ClickForwarder {
                 // 屏幕外那次没真正打开（只留下 1×1 的空窗口）才再按一次；已经开着的再按就关掉了
                 if InterfaceWatcher.placements(of: opened).values.allSatisfy({ $0.frame.width <= 8 }) {
                     let baseline = await InterfaceWatcher.windows(of: pids)
-                    await press(item, at: itemFrame)
+                    await press(item, at: itemFrame, onScreen: bars.contains { $0.holds(itemFrame) })
                     opened = await InterfaceWatcher.waitUntilOpened(pids: pids, baseline: baseline, timeout: .milliseconds(500))
                     if !opened.isEmpty, let destination, let activeBar {
                         moved = await PopupRelocator.relocate(opened, of: item.element, pid: item.pid, anchoredTo: itemFrame, in: activeBar, to: destination)
@@ -164,21 +173,77 @@ final class ClickForwarder {
         }
         if !opened.isEmpty {
             await InterfaceWatcher.waitUntilClosed(pids: pids, opened: opened)
+        } else if revealed {
+            // 点了没弹出任何窗口：有的图标是在菜单栏里原地展开（实测 QQ 音乐变成一排播放按钮）。
+            // 立刻藏回去用户就点不到了：光标还在菜单栏上就先露着，离开菜单栏一秒再藏
+            await Self.waitWhilePointerInMenuBar(bars, timeout: .seconds(20))
         }
         if moved { model.menuDidClose(choseItem: false) }
     }
 
-    /// 对真实图标"按下"。有的图标自己接鼠标事件（实测 Neat Download Manager），辅助功能里列着"按下"
-    /// 却回"不支持"：改成往图标的窗口发一次定向点击（不动光标，图标在屏幕外也收得到）
-    private func press(_ item: MenuBarItem, at frame: CGRect) async {
-        let result = await HiddenItemsStore.shared.scanner.press(item.element)
-        guard result == .actionUnsupported else { return }
-        guard let window = StatusBarRows.current().window(containing: frame.center) else {
-            log.error("\(item.id, privacy: .public) 不支持辅助功能的按下，也找不到它的窗口")
-            return
+    /// 等光标离开菜单栏（连续一秒不在任何一行菜单栏上），最多等 `timeout`
+    private static func waitWhilePointerInMenuBar(_ bars: [PopupRelocator.MenuBar], timeout: Duration) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        var outsideSince: ContinuousClock.Instant?
+        while clock.now < deadline {
+            let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
+            let location = NSEvent.mouseLocation
+            let point = CGPoint(x: location.x, y: primaryTop - location.y)
+            let inBar = bars.contains { $0.screen.minX <= point.x && point.x <= $0.screen.maxX && point.y <= $0.bottom + 4 && point.y >= $0.screen.minY - 4 }
+            if inBar {
+                outsideSince = nil
+            } else if let since = outsideSince {
+                if clock.now - since > .seconds(1) { return }
+            } else {
+                outsideSince = clock.now
+            }
+            try? await Task.sleep(for: .milliseconds(100))
         }
-        log.info("\(item.id, privacy: .public) 不支持辅助功能的按下，改发定向点击")
-        await Self.postClick(at: frame.center, window: window.id, pid: window.ownerPID)
+    }
+
+    /// 对真实图标"按下"。有的图标自己接鼠标事件（实测 Neat Download Manager、QQ 音乐），辅助功能里列着"按下"
+    /// 却回"不支持"：改成往图标的窗口发一次定向点击（不动光标，图标在屏幕外也收得到）。
+    /// macOS 27 上图标没有自己的窗口，只能在它显示在屏幕上时真点一下。
+    /// - Returns: 有没有发出去；false 表示图标不在屏幕上、又没有别的办法
+    @discardableResult
+    private func press(_ item: MenuBarItem, at frame: CGRect, onScreen: Bool) async -> Bool {
+        let result = await HiddenItemsStore.shared.scanner.press(item.element)
+        guard result == .actionUnsupported else { return true }
+        if let window = StatusBarRows.current().window(containing: frame.center) {
+            log.info("\(item.id, privacy: .public) 不支持辅助功能的按下，改发定向点击")
+            await Self.postClick(at: frame.center, window: window.id, pid: window.ownerPID)
+            return true
+        }
+        guard onScreen else {
+            log.info("\(item.id, privacy: .public) 不支持辅助功能的按下，也没有窗口，图标不在屏幕上")
+            return false
+        }
+        log.info("\(item.id, privacy: .public) 不支持辅助功能的按下，也没有窗口，在图标上真点一下：\(MoveDiagnostics.brief(frame), privacy: .public)")
+        await Self.postRealClick(at: frame.center)
+        return true
+    }
+
+    /// 临时露出隐藏的图标，等它出现在屏幕上，返回它的新位置；露不出来就结束露出、返回 nil
+    private func revealItem(_ item: MenuBarItem, alwaysHidden: Bool, in bars: [PopupRelocator.MenuBar]) async -> CGRect? {
+        let hider = MenuBarHider.shared
+        log.info("\(item.id, privacy: .public) 先露出来再点")
+        hider.beginTemporaryReveal(includingAlwaysHidden: alwaysHidden)
+        // macOS 27 上收进「«」的图标要滑将近一秒才回到菜单栏，辅助功能却一开始就报最终位置：
+        // 不等动画走完就点，会点到正滑过那里的别的图标。先等动画，再要位置连续两次一样
+        try? await Task.sleep(for: .milliseconds(900))
+        var previous: CGRect?
+        for _ in 0..<50 {
+            try? await Task.sleep(for: .milliseconds(40))
+            guard let frame = await HiddenItemsStore.shared.scanner.frame(of: item.element),
+                  bars.contains(where: { $0.holds(frame) })
+            else { previous = nil; continue }
+            if frame == previous { return frame }
+            previous = frame
+        }
+        log.error("\(item.id, privacy: .public) 露出来以后还是不在屏幕上")
+        hider.endTemporaryReveal()
+        return nil
     }
 
     /// 图标所在的进程，加上同一个 App 的其他进程：有的 App 图标挂在辅助进程上，弹窗却是主进程开的
@@ -213,6 +278,27 @@ final class ClickForwarder {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             eventQueue.async {
                 postClickNow(at: point, window: window, pid: pid)
+                continuation.resume()
+            }
+        }
+    }
+
+    /// 在屏幕上的这一点真点一下（菜单栏没有图标窗口时用）。光标会瞬间跳过去，点完回到原处
+    private nonisolated static func postRealClick(at point: CGPoint) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            eventQueue.async {
+                let source = CGEventSource(stateID: .hidSystemState)
+                let saved = CGEvent(source: nil)?.location
+                CGAssociateMouseAndMouseCursorPosition(0)
+                defer {
+                    if let saved { CGWarpMouseCursorPosition(saved) }
+                    CGAssociateMouseAndMouseCursorPosition(1)
+                }
+                for type in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
+                    CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
+                        .post(tap: .cghidEventTap)
+                    usleep(type == .mouseMoved ? 30_000 : 40_000)
+                }
                 continuation.resume()
             }
         }
