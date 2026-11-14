@@ -36,6 +36,8 @@ final class MenuBarScanner: @unchecked Sendable {
         var collector: CGRect? = nil
         /// 岛民开关的位置，用来探测每块屏幕菜单栏的深浅
         var toggle: CGRect?
+        /// macOS 27 上紧挨在分隔符左边的第二条分隔符；挨着的话已经并进 `separator` 里了
+        var spacer: CGRect? = nil
         /// 岛民自己图标的位置不是辅助功能报告的，是从 AppKit 读的
         var ownFramesFromAppKit = false
         /// 扫描结束时的菜单栏窗口快照
@@ -69,6 +71,7 @@ final class MenuBarScanner: @unchecked Sendable {
     static let alwaysHiddenSeparatorIdentifier = "IslanderAlwaysHiddenSeparator"
     static let collectorIdentifier = "IslanderCollector"
     static let toggleIdentifier = "IslanderToggle"
+    static let spacerIdentifier = "IslanderSpacer"
 
     private let queue = DispatchQueue(label: "com.kadaliao.islander.scanner", qos: .userInitiated)
     private let actionQueue = DispatchQueue(label: "com.kadaliao.islander.ax-action", qos: .userInitiated)
@@ -94,7 +97,28 @@ final class MenuBarScanner: @unchecked Sendable {
                 result.ownFramesFromAppKit = true
             }
         }
+        if result.spacer == nil, result.ownFramesFromAppKit {
+            result.spacer = await MainActor.run { MenuBarHider.shared.ownFrames.spacer }
+        }
+        // 第二条分隔符紧挨在分隔符左边时，两条当成一条：它左边才算藏起来的，
+        // 往岛上放图标时也落在它左边（落在两条中间的图标会漏在菜单栏上）
+        if let spacer = result.spacer, let separator = result.separator {
+            if Self.isAdjacent(spacer, leftOf: separator) {
+                result.separator = separator.union(spacer)
+            } else if spacer.width >= 100, separator.width >= 100 {
+                // 藏着的时候（两条都伸长）辅助功能报的分隔符位置是「右边缘减长度」，左边缘在几百 pt 外，
+                // 按它分区就一个图标都算不进岛上；第二条报的左边缘是真的（实测：藏起来的图标止于 1818，
+                // 第二条 x=1833，分隔符却报 x=617）。它就挨在分隔符左边，以它的左边缘为界
+                result.separator = CGRect(x: spacer.minX, y: separator.minY, width: separator.width, height: separator.height)
+            }
+        }
         return result
+    }
+
+    /// `spacer` 紧挨在 `separator` 左边（同一行，中间没有空出一个图标的位置）
+    static func isAdjacent(_ spacer: CGRect, leftOf separator: CGRect) -> Bool {
+        abs(spacer.midY - separator.midY) < 12 && spacer.minX < separator.minX
+            && abs(spacer.maxX - separator.minX) < 6
     }
 
     func forget(pid: pid_t) {
@@ -242,6 +266,7 @@ final class MenuBarScanner: @unchecked Sendable {
         var alwaysHiddenSeparator: CGRect?
         var collector: CGRect?
         var toggle: CGRect?
+        var spacer: CGRect?
         var found: [(app: AppInfo, index: Int, frame: CGRect, identifier: String?, label: String?,
                      element: AXUIElement)] = []
         let rowTops = Self.menuBarRowTops()
@@ -270,6 +295,7 @@ final class MenuBarScanner: @unchecked Sendable {
                     if identifier == Self.alwaysHiddenSeparatorIdentifier { alwaysHiddenSeparator = frame }
                     if identifier == Self.collectorIdentifier { collector = frame }
                     if identifier == Self.toggleIdentifier { toggle = frame }
+                    if identifier == Self.spacerIdentifier { spacer = frame }
                     continue
                 }
 
@@ -307,7 +333,7 @@ final class MenuBarScanner: @unchecked Sendable {
         items = Self.removingDuplicateWindows(items)
         items.sort { $0.frame.minX < $1.frame.minX }
         return Result(items: items, separator: separator, alwaysHiddenSeparator: alwaysHiddenSeparator,
-                      collector: collector, toggle: toggle, rows: rows, isFull: isFull,
+                      collector: collector, toggle: toggle, spacer: spacer, rows: rows, isFull: isFull,
                       duration: Date().timeIntervalSince(start))
     }
 }

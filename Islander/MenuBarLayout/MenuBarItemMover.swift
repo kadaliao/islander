@@ -102,6 +102,8 @@ final class MenuBarItemMover {
         do {
             try await performMove(itemID, to: destination)
             HiddenItemsStore.shared.setAlwaysHidden(itemID, destination.section == .alwaysHidden)
+            // 图标可能正好落在两条分隔符中间，把第二条重新挨上
+            await placeSpacer()
             return true
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -109,6 +111,60 @@ final class MenuBarItemMover {
             log.error("移动 \(itemID, privacy: .public) 失败：\(self.lastError ?? "", privacy: .public)")
             return false
         }
+    }
+
+    /// macOS 27：把第二条分隔符拖到紧挨分隔符左边（见 MenuBarHider.usesSpacer）。已经挨着就什么都不做。
+    /// 启动时、每次移动完图标后调用
+    func placeSpacer() async {
+        guard MenuBarHider.usesSpacer, !isMoving, AXIsProcessTrusted() else { return }
+        let hider = MenuBarHider.shared
+        func adjacent() -> (spacer: CGRect, separator: CGRect, done: Bool)? {
+            let frames = hider.ownFrames
+            guard let spacer = frames.spacer, let separator = frames.separator else { return nil }
+            return (spacer, separator, MenuBarScanner.isAdjacent(spacer, leftOf: separator))
+        }
+
+        movingItemID = MenuBarSnapshot.spacerID
+        let store = HiddenItemsStore.shared
+        store.isPaused = true
+        ScreenManager.shared.isSuspended = true
+        hider.beginTemporaryReveal(includingAlwaysHidden: true)
+        defer {
+            hider.endTemporaryReveal()
+            ScreenManager.shared.isSuspended = false
+            store.isPaused = false
+            store.refresh(after: .milliseconds(400))
+            movingItemID = nil
+        }
+        // 两条都缩回细线、位置稳定下来
+        var previous: (CGRect, CGRect)?
+        for _ in 0..<20 {
+            try? await Task.sleep(for: .milliseconds(100))
+            guard let now = adjacent(), now.separator.width < 100, now.spacer.width < 100 else { continue }
+            if let previous, previous == (now.spacer, now.separator) { break }
+            previous = (now.spacer, now.separator)
+        }
+        for attempt in 1...3 {
+            guard let now = adjacent(), now.separator.width < 100, now.spacer.width < 100 else {
+                log.error("第二条分隔符：读不到位置，不拖")
+                return
+            }
+            if now.done {
+                if attempt > 1 { log.notice("第二条分隔符已挨着分隔符（拖了 \(attempt - 1) 次）") }
+                return
+            }
+            let row = RowGeometry(containing: now.separator)
+            // 落在分隔符里靠左边缘 2pt：两个方向都正好停在它左边（见 RowGeometry.dropPoint 的实测规律）
+            guard let start = row.grabPoint(for: now.spacer), row.isReachable(now.separator.minX + 2) else {
+                log.error("第二条分隔符拖不到：\(MoveDiagnostics.brief(now.spacer), privacy: .public) → \(MoveDiagnostics.brief(now.separator), privacy: .public)")
+                return
+            }
+            let end = CGPoint(x: now.separator.minX + 2, y: now.separator.midY)
+            log.notice("拖第二条分隔符 \(Int(start.x)) → \(Int(end.x))（第 \(attempt) 次）")
+            await Self.drag(from: start, to: end)
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        log.error("第二条分隔符拖了 3 次还没挨着分隔符")
     }
 
     // MARK: - 流程
@@ -498,6 +554,7 @@ struct MenuBarSnapshot {
     static let alwaysHiddenSeparatorID = "islander|always-hidden-separator"
     static let toggleID = "islander|toggle"
     static let collectorID = "islander|collector"
+    static let spacerID = "islander|spacer"
 
     let entries: [Entry]
     let separator: CGRect

@@ -27,6 +27,7 @@ final class MenuBarHider: NSObject {
         static let separator = "IslanderSeparator"
         static let alwaysHidden = "IslanderAlwaysHiddenSeparator"
         static let collector = "IslanderCollector"
+        static let spacer = "IslanderSpacer"
     }
     /// 以前版本存的"图标藏没藏起来"，现在一直藏着，启动时清掉
     private static let legacyHiddenKey = "menuBarItemsHidden"
@@ -67,6 +68,8 @@ final class MenuBarHider: NSObject {
     @ObservationIgnored private var contextMenu: NSMenu?
     @ObservationIgnored private var ignoresToggleClicksUntil = Date.distantPast
     @ObservationIgnored private var collectorItem: NSStatusItem?
+    /// macOS 27：紧挨在分隔符左边的第二条隐形分隔符（见 `usesSpacer`）
+    @ObservationIgnored private var spacerItem: NSStatusItem?
     @ObservationIgnored private var screenObserver: NSObjectProtocol?
     /// 上一次由我们写下的收纳符首选位置
     @ObservationIgnored private var collectorPosition: CGFloat?
@@ -102,6 +105,7 @@ final class MenuBarHider: NSObject {
 
         createSeparator()
         createAlwaysHiddenSeparator()
+        if Self.usesSpacer { createSpacer() }
         applyLengths()
         // 隐藏长度按屏幕宽度算（macOS 27），接上 / 拔掉显示器、改分辨率后重新算
         screenObserver = NotificationCenter.default.addObserver(
@@ -168,6 +172,28 @@ final class MenuBarHider: NSObject {
         separatorItem = separator
     }
 
+    /// macOS 27 上单条分隔符最长只能半个屏幕（再长系统就把它丢掉，见 `hidingLength`），
+    /// 而菜单栏的空余经常比这更宽：系统只把放不下的那几个图标收进「«」，剩下的照样露在分隔符左边，
+    /// 前台 App 的菜单一长一短，露出来的个数就跟着变，图标看起来在飘。
+    /// 所以在分隔符左边再紧挨着放一条同样长的，两条加起来一定占满空余，左边的图标全部收进「«」。
+    /// 系统不认首选位置（新建的图标总在最左边），由 MenuBarItemMover.placeSpacer() 按住 ⌘ 拖到分隔符左边，
+    /// 之后系统按 autosaveName 记住
+    static var usesSpacer: Bool {
+        if #available(macOS 27, *) { return true }
+        return false
+    }
+
+    private func createSpacer() {
+        let spacer = NSStatusBar.system.statusItem(withLength: Self.separatorLength)
+        spacer.autosaveName = Name.spacer
+        spacer.isVisible = true
+        if let button = spacer.button {
+            (button.cell as? NSButtonCell)?.highlightsBy = []
+            button.setAccessibilityIdentifier(MenuBarScanner.spacerIdentifier)
+        }
+        spacerItem = spacer
+    }
+
     private func createAlwaysHiddenSeparator() {
         let separator = NSStatusBar.system.statusItem(withLength: Self.hidingLength)
         separator.autosaveName = Name.alwaysHidden
@@ -217,6 +243,7 @@ final class MenuBarHider: NSObject {
             try? await Task.sleep(for: .milliseconds(400))
             isReady = true
             onReady?()
+            if Self.usesSpacer { await MenuBarItemMover.shared.placeSpacer() }
         }
     }
 
@@ -256,6 +283,7 @@ final class MenuBarHider: NSObject {
         var alwaysHiddenSeparator: CGRect?
         var collector: CGRect?
         var toggle: CGRect?
+        var spacer: CGRect?
     }
 
     /// 从 AppKit 读自己图标的位置：macOS 27 上辅助功能不再报告岛民自己的 AXExtrasMenuBar（issue #1），
@@ -264,7 +292,8 @@ final class MenuBarHider: NSObject {
         OwnFrames(separator: Self.menuBarFrame(separatorItem),
                   alwaysHiddenSeparator: Self.menuBarFrame(alwaysHiddenItem),
                   collector: collectsAll ? Self.menuBarFrame(collectorItem) : nil,
-                  toggle: Self.menuBarFrame(toggleItem))
+                  toggle: Self.menuBarFrame(toggleItem),
+                  spacer: Self.menuBarFrame(spacerItem))
     }
 
     /// AppKit 原样给出的位置，不做筛选：诊断信息用
@@ -383,6 +412,7 @@ final class MenuBarHider: NSObject {
         let showsAlwaysHidden = showsHidden && (!hasAlwaysHiddenItems
             || (isTemporarilyRevealed && temporarilyRevealsAlwaysHidden))
         separatorItem?.length = showsHidden ? Self.separatorLength : Self.hidingLength
+        spacerItem?.length = showsHidden ? Self.separatorLength : Self.hidingLength
         separatorItem?.button?.image = showsHidden ? Self.separatorImage : nil
         alwaysHiddenItem?.length = showsAlwaysHidden ? Self.separatorLength : Self.hidingLength
         // 只在全部露出（调整布局等）时画出来；平时就算缩成细线也不显示，菜单栏上不多一个记号
