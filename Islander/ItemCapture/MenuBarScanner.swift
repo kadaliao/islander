@@ -288,6 +288,11 @@ final class MenuBarScanner: @unchecked Sendable {
                 guard let frame = AX.frame(wrapper), frame.width > 0, frame.height > 0 else { continue }
                 // 位置按外层算（和其他图标一样占满菜单栏这一格），标识、描述、按下都用里面那一个
                 let child = Self.unwrappedMenuExtra(wrapper) ?? wrapper
+                // macOS 27 上图标放不下时，MenuBarAgent 会多挂一个「«」按钮（AXButton，描述「显示隐藏菜单栏项目」）。
+                // 它不是图标：列进岛里点了什么都打不开
+                if app.bundleID == "com.apple.MenuBarAgent", AX.string(child, kAXRoleAttribute) == kAXButtonRole as String {
+                    continue
+                }
                 let identifier = AX.string(child, kAXIdentifierAttribute)
 
                 if app.pid == own.pid {
