@@ -61,7 +61,6 @@ final class MenuBarScanner: @unchecked Sendable {
     static let collectorIdentifier = "IslanderCollector"
     static let toggleIdentifier = "IslanderToggle"
     /// macOS 27 上紧挨在分隔符 / 收纳符右边的垫片
-    static let padIdentifier = "IslanderPad"
 
     private let queue = DispatchQueue(label: "com.kadaliao.islander.scanner", qos: .userInitiated)
     private let actionQueue = DispatchQueue(label: "com.kadaliao.islander.ax-action", qos: .userInitiated)

@@ -329,6 +329,8 @@ final class HiddenItemsStore {
                 }) {
                     delta = -12
                 } else {
+                    // 收纳符到位了，再把它的垫片挪到紧挨它右边
+                    await hider.settleCollectorPad()
                     break
                 }
                 // macOS 27 只在新建时读首选位置，数值和像素对不上：换个数值删掉重建，二分找到紧挨开关的那一档

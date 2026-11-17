@@ -90,6 +90,9 @@ final class MenuBarHider: NSObject {
     @ObservationIgnored private var separatorRightEdge: CGFloat?
     @ObservationIgnored private var collectorRightEdge: CGFloat?
     @ObservationIgnored private var alwaysHiddenRightEdge: CGFloat?
+    /// macOS 27：分隔符、收纳符和各自垫片之间隔着的图标的宽度（AppKit 窗口之间的空当）
+    @ObservationIgnored private var separatorPadGap: CGFloat = 0
+    @ObservationIgnored private var collectorPadGap: CGFloat = 0
     /// 上一次设长度时哪些图标在菜单栏上
     @ObservationIgnored private var appliedShows = (hidden: false, alwaysHidden: false)
     /// 上一次由我们写下的收纳符首选位置
@@ -225,11 +228,15 @@ final class MenuBarHider: NSObject {
     /// 系统按首选位置排序，比那个图标的首选位置小一点就紧挨在它右边
     /// - Parameter neighborFrame: 那个图标排好后的位置（AppKit 坐标）。系统还没记下它的首选位置时（首次启动），按它算
     private func createPad(_ name: String, rightOf neighbor: String, replacing old: NSStatusItem?,
-                           neighborFrame: CGRect? = nil) -> NSStatusItem? {
+                           at position: CGFloat? = nil, neighborFrame: CGRect? = nil) -> NSStatusItem? {
         guard Self.hidesByOverflow else { return nil }
         if let old { NSStatusBar.system.removeStatusItem(old) }
         let neighborPosition = UserDefaults.standard.double(forKey: Self.preferredPositionKey(neighbor))
-        if neighborPosition > 0 {
+        // 删掉再建同名图标时系统会把记着的首选位置也删掉（实测 27.3：建的那一刻读到了，之后就没了），
+        // 找到的数值另外记一份，每次建之前写回去
+        if let position = position ?? Self.savedPadPosition(name) {
+            UserDefaults.standard.set(position, forKey: Self.preferredPositionKey(name))
+        } else if neighborPosition > 0 {
             // 收纳符和开关之间只差 1，取一半
             UserDefaults.standard.set(max(neighborPosition - 0.5, 0.25), forKey: Self.preferredPositionKey(name))
         } else if let neighborFrame,
@@ -240,12 +247,15 @@ final class MenuBarHider: NSObject {
         }
         // 来回切 isVisible 会让它丢掉位置（实测），一直显示着，只改长度
         UserDefaults.standard.removeObject(forKey: Self.visibleKey(name))
+        // 别的图标跟着挪位置，AppKit 报告的位置要过一会儿才跟上
+        lastLengthChange = Date()
         let pad = NSStatusBar.system.statusItem(withLength: 0)
         pad.autosaveName = name
         pad.isVisible = true
         if let button = pad.button {
             (button.cell as? NSButtonCell)?.highlightsBy = []
-            button.setAccessibilityIdentifier(MenuBarScanner.padIdentifier)
+            // 按名字区分两个垫片，settlePad 从辅助功能里读它们的位置
+            button.setAccessibilityIdentifier(name)
         }
         return pad
     }
@@ -290,24 +300,137 @@ final class MenuBarHider: NSObject {
             applyLengths()
         }
 
-        // 垫片必须紧挨在分隔符右边，中间夹着的图标会被一起收走
-        if Self.hidesByOverflow, let frames = Self.settledFrames([separatorItem, separatorPad]),
-           abs(frames[1].minX - frames[0].maxX) > 2 {
-            log.notice("垫片没紧挨着分隔符：\(String(describing: frames), privacy: .public)，重放")
-            separatorPad = createPad(Name.separatorPad, rightOf: Name.separator, replacing: separatorPad,
-                                     neighborFrame: frames[0])
-        }
-
         UserDefaults.standard.removeObject(forKey: Self.legacyHiddenKey)
-        createCollectorIfNeeded()
-        isHiding = true
-        applyLengths()
-        // 刚改完分隔符长度，图标还要约 150ms 才移到位
         Task {
+            // 垫片必须紧挨在分隔符右边，中间夹着的图标会被一起收走。这时图标都还排在菜单栏上，位置读得准
+            if Self.hidesByOverflow {
+                await settlePad(Name.separatorPad, rightOf: \.separatorItem,
+                                identifier: MenuBarScanner.separatorIdentifier, pad: \.separatorPad)
+                // 等 AppKit 报告的位置跟上，applyLengths 要量垫片的右端和它与分隔符之间的空当
+                try? await Task.sleep(for: .milliseconds(400))
+            }
+            createCollectorIfNeeded()
+            isHiding = true
+            applyLengths()
+            // 刚改完分隔符长度，图标还要约 150ms 才移到位
             try? await Task.sleep(for: .milliseconds(400))
             isReady = true
             onReady?()
         }
+    }
+
+    /// macOS 27：把垫片挪到 neighbor 右边。首选位置只在新建时读，按新建那一刻的排布换算，和像素对不上，
+    /// 首次建的垫片常常落在分隔符左边（实测 27.3）。在左边就换个更小的数值重建（越小越靠右），二分着往分隔符靠。
+    /// 不一定能紧挨着：有的排布里分隔符右边那几个空当怎么给数值都落不进去。隔着的图标本来就在分隔符右边、算常显，
+    /// 垫片伸长时让出它们的宽度就行（见 padGaps）。只在图标都排在菜单栏上（没收进「«」）时调用
+    private func settlePad(_ name: String, rightOf neighbor: KeyPath<MenuBarHider, NSStatusItem?>,
+                           identifier neighborIdentifier: String,
+                           pad: ReferenceWritableKeyPath<MenuBarHider, NSStatusItem?>) async {
+        var low: CGFloat = 0
+        var high: CGFloat?
+        // 建垫片时用的数值。不能回头读系统记的那份，它可能已经被删了
+        var current = Self.savedPadPosition(name)
+            ?? CGFloat(UserDefaults.standard.double(forKey: Self.preferredPositionKey(name)))
+        /// 落在右边的数值里离 neighbor 最近的一个
+        var best: (position: CGFloat, gap: CGFloat)?
+        var lastPad: CGRect?
+        for attempt in 0..<10 {
+            guard let frames = await stableFrames(neighbor, neighborIdentifier, pad, name) else {
+                log.error("垫片 \(name, privacy: .public) 没排好，不调了")
+                return
+            }
+            let gap = frames.pad.minX - frames.neighbor.maxX - frames.adjacentGap
+            // 换了数值重建，位置却没变：再试也一样
+            let stuck = lastPad == frames.pad
+            lastPad = frames.pad
+            if frames.pad.midX > frames.neighbor.midX {
+                if best == nil || gap < best!.gap { best = (current, gap) }
+                // 紧挨着了（中间最多夹着岛民自己一个 0 长的垫片，约 16），或者试不动了：就这样
+                if gap <= 18 || stuck || attempt >= 5 {
+                    if attempt > 0 {
+                        log.notice("垫片 \(name, privacy: .public) 落在右边，隔着 \(Int(gap))，首选位置 \(current)")
+                        Self.savePadPosition(current, for: name)
+                    }
+                    return
+                }
+                low = current
+            } else {
+                high = current
+            }
+            let next = high.map { (low + $0) / 2 } ?? current * 1.5 + 20
+            if abs(next - current) < 0.25 || stuck || attempt >= 5 { break }
+            log.notice("垫片 \(name, privacy: .public) 位置不对：\(String(describing: frames.neighbor), privacy: .public) / \(String(describing: frames.pad), privacy: .public)，首选位置 \(current) → \(next) 重建")
+            current = next
+            self[keyPath: pad] = createPad(name, rightOf: "", replacing: self[keyPath: pad], at: next)
+        }
+        // 最后一次落在了左边：退回到落在右边的那个数值
+        guard let best else {
+            log.error("垫片 \(name, privacy: .public) 找不到分隔符右边的位置")
+            return
+        }
+        log.notice("垫片 \(name, privacy: .public) 退回首选位置 \(best.position)（隔着 \(Int(best.gap))）")
+        self[keyPath: pad] = createPad(name, rightOf: "", replacing: self[keyPath: pad], at: best.position)
+        Self.savePadPosition(best.position, for: name)
+        _ = await stableFrames(neighbor, neighborIdentifier, pad, name)
+    }
+
+    /// 新建的图标要过一会儿才排好，别的图标也跟着挪：连续两次读到一样的位置才算数。
+    /// 优先看辅助功能：刚重建的图标，AppKit 报告的窗口位置会旧一阵子。
+    /// 辅助功能里相邻两个图标之间隔约 14，AppKit 的窗口是首尾相接的（adjacentGap）
+    private func stableFrames(_ neighbor: KeyPath<MenuBarHider, NSStatusItem?>, _ neighborIdentifier: String,
+                              _ pad: KeyPath<MenuBarHider, NSStatusItem?>, _ name: String) async
+        -> (neighbor: CGRect, pad: CGRect, adjacentGap: CGFloat)? {
+        var previous: (neighbor: CGRect, pad: CGRect, adjacentGap: CGFloat)?
+        for _ in 0..<30 {
+            try? await Task.sleep(for: .milliseconds(150))
+            var current: (neighbor: CGRect, pad: CGRect, adjacentGap: CGFloat)?
+            let ax = await Self.ownAXFrames([neighborIdentifier, name])
+            if let a = ax[neighborIdentifier], let b = ax[name] {
+                current = (a, b, 14)
+            } else if let frames = Self.laidOutFrames([self[keyPath: neighbor], self[keyPath: pad]]) {
+                current = (frames[0], frames[1], 0)
+            }
+            if let current, let previous, current.neighbor == previous.neighbor, current.pad == previous.pad {
+                return current
+            }
+            previous = current
+        }
+        return nil
+    }
+
+    /// 辅助功能报告的岛民自己的图标位置（CG 坐标），按标识。要在后台读：主线程得空着回答这些请求。
+    /// 有的系统上辅助功能不报告岛民自己的图标（issue #1），这时是空的
+    private nonisolated static func ownAXFrames(_ identifiers: [String]) async -> [String: CGRect] {
+        await Task.detached {
+            let app = AXUIElementCreateApplication(getpid())
+            AXUIElementSetMessagingTimeout(app, 0.5)
+            guard let bar = AX.element(app, "AXExtrasMenuBar") else { return [:] }
+            var frames: [String: CGRect] = [:]
+            for child in AX.elements(bar, kAXChildrenAttribute) {
+                guard let id = AX.string(child, kAXIdentifierAttribute), identifiers.contains(id),
+                      let frame = AX.frame(child) else { continue }
+                frames[id] = frame
+            }
+            return frames
+        }.value
+    }
+
+    /// 垫片找到的首选位置，岛民自己记的一份（系统那份会被删掉，见 createPad）
+    private static func savedPadPosition(_ name: String) -> CGFloat? {
+        (UserDefaults.standard.object(forKey: "IslanderPadPosition \(name)") as? Double).map { CGFloat($0) }
+    }
+
+    private static func savePadPosition(_ position: CGFloat, for name: String) {
+        UserDefaults.standard.set(Double(position), forKey: "IslanderPadPosition \(name)")
+        UserDefaults.standard.set(Double(position), forKey: preferredPositionKey(name))
+    }
+
+    /// macOS 27：收纳符排好以后，把它的垫片挪到紧挨它右边（HiddenItemsStore 临时放出图标时调用）
+    func settleCollectorPad() async {
+        guard Self.hidesByOverflow, collectorItem != nil else { return }
+        await settlePad(Name.collectorPad, rightOf: \.collectorItem,
+                        identifier: MenuBarScanner.collectorIdentifier, pad: \.collectorPad)
+        applyLengths()
     }
 
     /// 临时露出被隐藏的图标
@@ -441,6 +564,9 @@ final class MenuBarHider: NSObject {
         collectorItem = nil
         collectorPad = nil
         collectorRightEdge = nil
+        collectorPadGap = 0
+        // 下次收纳符按新的数值建，它的垫片也重新找
+        UserDefaults.standard.removeObject(forKey: "IslanderPadPosition \(Name.collectorPad)")
         // 别的图标跟着挪位置，AppKit 报告的位置要过一会儿才跟上
         lastLengthChange = Date()
     }
@@ -581,29 +707,37 @@ final class MenuBarHider: NSObject {
                   abs(frame.width - pad.length - 16) < 2 else { return nil }
             return frame.maxX - 8
         }
+        // 分隔符和垫片之间隔着的图标（垫片没能紧挨着分隔符，见 settlePad）有多宽。露出来、排好了的时候量
+        func gap(_ neighbor: NSStatusItem?, _ pad: NSStatusItem?, shown: Bool) -> CGFloat? {
+            guard shown, settled, neighbor?.length == Self.separatorLength, pad?.length == 0,
+                  let frames = Self.laidOutFrames([neighbor, pad]) else { return nil }
+            return max(frames[1].minX - frames[0].maxX, 0)
+        }
         // 有收纳符时它和它的垫片夹在分隔符垫片和开关之间，分隔符这边的位置都不是平时的，不记
         if collectorItem == nil, collectorPad == nil {
             separatorRightEdge = padEnd(separatorPad)
                 ?? edge(separatorItem, shown: appliedShows.hidden).map { $0 + 8 } ?? separatorRightEdge
+            separatorPadGap = gap(separatorItem, separatorPad, shown: appliedShows.hidden) ?? separatorPadGap
         }
         alwaysHiddenRightEdge = edge(alwaysHiddenItem, shown: appliedShows.alwaysHidden) ?? alwaysHiddenRightEdge
         if collectsAll {
             collectorRightEdge = padEnd(collectorPad)
                 ?? edge(collectorItem, shown: appliedShows.hidden).map { $0 + 8 } ?? collectorRightEdge
+            collectorPadGap = gap(collectorItem, collectorPad, shown: appliedShows.hidden) ?? collectorPadGap
         }
         appliedShows = (showsHidden, showsAlwaysHidden)
 
         // 显示全部图标时收纳符把分隔符连同它左边的一起收走，分隔符不用伸长（收进去的长条会让「«」和提示胶囊消失）
         let collecting = collectsAll && !showsHidden
-        let separator = overflowLengths(rightEdge: separatorRightEdge, cap: cap)
+        let separator = overflowLengths(rightEdge: separatorRightEdge, gap: separatorPadGap, cap: cap)
         separatorItem?.length = showsHidden || collecting ? Self.separatorLength : separator.spacer
         separatorPad?.length = showsHidden || collecting ? 0 : separator.pad
         // 永远隐藏分隔符在分隔符左边，全藏着时跟着一起收进去，不用伸长；
         // 只露出藏到岛上的图标时（点岛上的图标）才要靠它自己放不下，把永远隐藏的图标留在「«」里
-        let alwaysHidden = overflowLengths(rightEdge: alwaysHiddenRightEdge, cap: cap)
+        let alwaysHidden = overflowLengths(rightEdge: alwaysHiddenRightEdge, gap: 0, cap: cap)
         alwaysHiddenItem?.length = showsHidden && !showsAlwaysHidden
             ? min(alwaysHidden.spacer + alwaysHidden.pad, cap) : Self.separatorLength
-        let collector = overflowLengths(rightEdge: collectorRightEdge, cap: cap)
+        let collector = overflowLengths(rightEdge: collectorRightEdge, gap: collectorPadGap, cap: cap)
         collectorItem?.length = !collectsAll ? 0 : showsHidden ? Self.separatorLength : collector.spacer
         collectorPad?.length = collectsAll && !showsHidden ? collector.pad : 0
     }
@@ -617,7 +751,8 @@ final class MenuBarHider: NSObject {
     /// - spacer 左端 < 约 150 时，系统连提示胶囊也不显示了。
     /// 菜单多的 App（访达等）在前台时「«」也会出现，大概是系统能把菜单缩短腾地方。
     /// 「«」出不出现没法事先算准，所以不去凑它，只保证藏得住、胶囊还在。
-    private func overflowLengths(rightEdge: CGFloat?, cap: CGFloat) -> (spacer: CGFloat, pad: CGFloat) {
+    /// - Parameter gap: 分隔符和垫片之间隔着的图标的宽度。它们排在垫片左边，胶囊排在它们左边
+    private func overflowLengths(rightEdge: CGFloat?, gap: CGFloat, cap: CGFloat) -> (spacer: CGFloat, pad: CGFloat) {
         guard let rightEdge, let area = Self.statusArea(near: rightEdge) else { return (cap, cap) }
         let left = area.left
         let reserve = Self.indicatorReserve
@@ -634,8 +769,8 @@ final class MenuBarHider: NSObject {
             }
         }
         // 垫片、分隔符都不能超过上限，垫片不能是负的
-        padLeft = min(max(padLeft, rightEdge - cap), left + cap - Self.spacerOvershoot, rightEdge)
-        let pad = rightEdge - padLeft
+        padLeft = min(max(padLeft, rightEdge - gap - cap), left + cap - Self.spacerOvershoot, rightEdge - gap)
+        let pad = rightEdge - gap - padLeft
         let spacer = min(max(padLeft - left + Self.spacerOvershoot, 100), cap)
         return (spacer, pad)
     }
