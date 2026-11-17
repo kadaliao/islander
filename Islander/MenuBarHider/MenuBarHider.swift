@@ -615,7 +615,8 @@ final class MenuBarHider: NSObject {
     /// - spacer 左端在 ≥ 约 200（菜单右边 +16）时放得下，藏着的图标会露出来（算上胶囊和「«」要占的位置）；
     /// - spacer 左端 < 约 200 时放不下，连同左边一起收走；在 200 附近、又只因为胶囊占了地方才放不下时，系统才显示「«」；
     /// - spacer 左端 < 约 150 时，系统连提示胶囊也不显示了。
-    /// 没有胶囊时只要放不下就没有「«」，所以不去凑「«」，只保证藏得住、胶囊还在。
+    /// 菜单多的 App（访达等）在前台时「«」也会出现，大概是系统能把菜单缩短腾地方。
+    /// 「«」出不出现没法事先算准，所以不去凑它，只保证藏得住、胶囊还在。
     private func overflowLengths(rightEdge: CGFloat?, cap: CGFloat) -> (spacer: CGFloat, pad: CGFloat) {
         guard let rightEdge, let area = Self.statusArea(near: rightEdge) else { return (cap, cap) }
         let left = area.left
@@ -625,8 +626,9 @@ final class MenuBarHider: NSObject {
             // 没刘海的屏幕上岛民画了个虚拟的岛，系统不知道它，胶囊可能排到岛底下。
             // 让胶囊贴着岛：岛左边放得下就贴在岛左边，放不下就排到岛右边
             if island.minX - Self.islandGap - left >= reserve {
-                // 胶囊右边还空着「«」的位子（这样的长度下「«」不出现），让这段空位落在岛底下
-                padLeft = island.minX - Self.islandGap + Self.indicatorSlot
+                // 胶囊和垫片之间是「«」的位子（约 47），「«」不出现时空着。
+                // 它出不出现看前台 App：菜单多的（访达）系统能缩菜单腾地方，就会出现，不能让它落在岛底下
+                padLeft = island.minX - Self.islandGap
             } else if island.maxX + Self.islandGap > left {
                 padLeft = island.maxX + Self.islandGap + reserve
             }
@@ -644,8 +646,6 @@ final class MenuBarHider: NSObject {
     private static let spacerOvershoot: CGFloat = 4
     /// 胶囊和虚拟岛之间的空隙
     private static let islandGap: CGFloat = 6
-    /// 系统在胶囊和垫片之间给「«」留的空位（实测胶囊右边到垫片左边 47）
-    private static let indicatorSlot: CGFloat = 47
 
     /// 菜单栏上状态栏图标最左能排到哪里（CG x）：前台 App 菜单的右边，有刘海时至少在刘海右边。
     /// 没刘海、岛民画了虚拟岛的屏幕上，一并给出岛的水平范围
