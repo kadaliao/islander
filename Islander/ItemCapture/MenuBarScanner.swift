@@ -60,6 +60,8 @@ final class MenuBarScanner: @unchecked Sendable {
     static let alwaysHiddenSeparatorIdentifier = "IslanderAlwaysHiddenSeparator"
     static let collectorIdentifier = "IslanderCollector"
     static let toggleIdentifier = "IslanderToggle"
+    /// macOS 27 上紧挨在分隔符 / 收纳符右边的垫片
+    static let padIdentifier = "IslanderPad"
 
     private let queue = DispatchQueue(label: "com.kadaliao.islander.scanner", qos: .userInitiated)
     private let actionQueue = DispatchQueue(label: "com.kadaliao.islander.ax-action", qos: .userInitiated)
@@ -148,6 +150,19 @@ final class MenuBarScanner: @unchecked Sendable {
     }
 
     // MARK: - 扫描（queue 上执行）
+
+    private static let menuBarAgent = "com.apple.MenuBarAgent"
+
+    /// macOS 27 的 MenuBarAgent：AXGroup › AXGroup › AXMenuBarItem，找最里面那个
+    private static func innermostMenuBarItem(_ element: AXUIElement) -> AXUIElement? {
+        var current = element
+        for _ in 0..<3 {
+            guard let next = AX.elements(current, kAXChildrenAttribute).first else { return nil }
+            if AX.string(next, kAXRoleAttribute) == kAXMenuBarItemRole { return next }
+            current = next
+        }
+        return nil
+    }
 
     /// 同一个图标窗口被两个 App 报告时只留一个：实测 Control Center 会额外挂一个
     /// 和某些第三方图标窗口一样大的元素（没有标识、没有描述），保留真正的那个 App
@@ -238,12 +253,26 @@ final class MenuBarScanner: @unchecked Sendable {
             for (index, child) in children.enumerated() {
                 // Control Center 会挂一些 0 尺寸的占位元素
                 guard let frame = AX.frame(child), frame.width > 0, frame.height > 0 else { continue }
-                let identifier = AX.string(child, kAXIdentifierAttribute)
+                var child = child
+                var identifier = AX.string(child, kAXIdentifierAttribute)
+                if app.bundleID == Self.menuBarAgent, app.pid != own.pid {
+                    // macOS 27：「屏幕共享」、麦克风 / 摄像头等提示胶囊（live-activity-pill-…、av-module-pill-…）、
+                    // 系统的「«」都不是状态栏图标，不能移动也不该收到岛上
+                    if let identifier, identifier.contains("-pill") || identifier.hasPrefix("menu-bar-overflow-indicator") {
+                        continue
+                    }
+                    // Wi‑Fi、时钟这些系统图标包在两层 AXGroup 里，真正的图标（带标识和描述）在里面
+                    if identifier == nil, let inner = Self.innermostMenuBarItem(child) {
+                        child = inner
+                        identifier = AX.string(inner, kAXIdentifierAttribute)
+                    }
+                }
 
                 if app.pid == own.pid {
                     if identifier == Self.separatorIdentifier { separator = frame }
                     if identifier == Self.alwaysHiddenSeparatorIdentifier { alwaysHiddenSeparator = frame }
-                    if identifier == Self.collectorIdentifier { collector = frame }
+                    // macOS 27 上不用"显示全部图标"时收纳符缩成 0 长留在原位，不算数
+                    if identifier == Self.collectorIdentifier, frame.width >= 4 { collector = frame }
                     if identifier == Self.toggleIdentifier { toggle = frame }
                     continue
                 }

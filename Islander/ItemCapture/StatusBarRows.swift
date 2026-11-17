@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -92,6 +93,28 @@ struct StatusBarRows: Sendable {
             }
         }
         return nil
+    }
+}
+
+extension StatusBarRows {
+    /// macOS 27：窗口服务器里没有单个图标的窗口了，MenuBarAgent 把整条菜单栏的图标画在和屏幕一样宽的窗口里
+    /// （主菜单层级、透明底，实测截得到被画出来的图标）。每块屏幕的菜单栏一个（同一位置偶尔有几个，内容一样）
+    static func agentBarWindows() -> [Window] {
+        guard let agent = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.MenuBarAgent").first,
+              let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
+        else { return [] }
+        let pid = agent.processIdentifier
+        let layer = Int(CGWindowLevelForKey(.mainMenuWindow))
+        return list.compactMap { info in
+            guard (info[kCGWindowOwnerPID as String] as? pid_t) == pid,
+                  (info[kCGWindowLayer as String] as? Int) == layer,
+                  let number = info[kCGWindowNumber as String] as? NSNumber,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds), frame.height <= 60
+            else { return nil }
+            return Window(id: number.uint32Value, frame: frame, ownerPID: pid,
+                          isOnScreen: (info[kCGWindowIsOnscreen as String] as? Bool) ?? false)
+        }
     }
 }
 

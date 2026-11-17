@@ -233,7 +233,7 @@ struct LayoutPane: View {
             }
             .disabled(mover.isMoving)
             .help("移动图标不成功时，把这段信息贴给我们。第三方 App 的名字已经换成代号")
-            Button("重新读取") { store.refresh(full: true, forceCapture: true) }
+            Button("重新读取") { store.rescan() }
                 .disabled(mover.isMoving)
         }
         .font(.callout)

@@ -30,6 +30,8 @@ final class ItemImageCapturer: @unchecked Sendable {
         let windowFrame: CGRect
         /// 要裁出的区域（CG 全局坐标）。窗口两侧带一点留白，按辅助功能报告的按钮区域裁
         let crop: CGRect?
+        /// macOS 27：窗口是整条菜单栏，先裁出这一段（CG 全局坐标）当成图标自己的窗口
+        var region: CGRect? = nil
     }
 
     struct Captured: @unchecked Sendable {
@@ -58,8 +60,13 @@ final class ItemImageCapturer: @unchecked Sendable {
         }
 
         var batch = Batch()
-        for request in requests {
-            guard let image = raw[request.key] else { continue }
+        for var request in requests {
+            guard var image = raw[request.key] else { continue }
+            if let region = request.region {
+                guard let piece = Self.piece(of: image, windowFrame: request.windowFrame, region: region) else { continue }
+                image = piece
+                request = Request(key: request.key, windowID: request.windowID, windowFrame: region, crop: request.crop)
+            }
             switch Self.crop(image, request: request) {
             case .clipped:
                 batch.clipped.insert(request.key)
@@ -121,6 +128,18 @@ final class ItemImageCapturer: @unchecked Sendable {
     }
 
     // MARK: - 裁剪
+
+    /// 从整条菜单栏的截图里裁出一段
+    private static func piece(of image: CGImage, windowFrame: CGRect, region: CGRect) -> CGImage? {
+        guard windowFrame.width > 0 else { return nil }
+        let scale = CGFloat(image.width) / windowFrame.width
+        let local = region.offsetBy(dx: -windowFrame.minX, dy: -windowFrame.minY)
+        let rect = CGRect(x: (local.minX * scale).rounded(), y: (local.minY * scale).rounded(),
+                          width: (local.width * scale).rounded(), height: (local.height * scale).rounded())
+            .intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard !rect.isNull, rect.width >= 4, rect.height >= 4 else { return nil }
+        return image.cropping(to: rect)
+    }
 
     private enum Cropped {
         case image(CGImage, scale: CGFloat)

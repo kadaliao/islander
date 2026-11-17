@@ -97,8 +97,15 @@ final class HiddenItemsStore {
     /// 设置里的"菜单栏布局"正开着：所有图标都要截图
     var isEditingLayout = false {
         didSet {
-            if isEditingLayout, !oldValue { refresh() }
+            guard isEditingLayout, !oldValue else { return }
+            // macOS 27：藏起来的图标平时读不到，打开布局页时放出来扫一遍，布局和截图才是新的
+            if MenuBarHider.hidesByOverflow { revealAndScan() } else { refresh() }
         }
+    }
+
+    /// 布局页的「重新读取」
+    func rescan() {
+        if MenuBarHider.hidesByOverflow { revealAndScan(full: true, forceCapture: true) } else { refresh(full: true, forceCapture: true) }
     }
 
     /// 用户放进"永远隐藏"的图标。只认这里记下的：新出现的图标会自己落到菜单栏最左边（永远隐藏分隔符左边），
@@ -123,6 +130,18 @@ final class HiddenItemsStore {
             }
         }
     }
+    /// macOS 27：藏起来的图标收进「«」以后，辅助功能里就没有了（App 那边连 AXExtrasMenuBar 都可能没有），
+    /// 按不了、也读不到菜单。只能记住最后一次在菜单栏上看到它们时的样子，岛上照样显示；点的时候先放出来再按。
+    /// 只有被隐藏的图标在菜单栏上、并且排好了的时候扫到的位置才拿来分区（见 overflowLayout）。
+    /// 显示全部图标时收纳符把常显的也收进去，所以每个图标都记着
+    @ObservationIgnored private var rememberedItems: [String: MenuBarItem] = [:]
+    @ObservationIgnored private var knownHiddenIDs: Set<String> = []
+    @ObservationIgnored private var knownBeyondIDs: Set<String> = []
+    @ObservationIgnored private var revealScanTask: Task<Void, Never>?
+    /// 刚启动、可能有图标收进「«」里的菜单栏 App，等着放出来扫一遍
+    @ObservationIgnored private var launchedApps: [pid_t: MenuBarScanner.AppInfo] = [:]
+    @ObservationIgnored private var launchScan: Task<Void, Never>?
+
     /// 至少完成过一次全量扫描（区分"正在读取"和"没有隐藏的图标"）
     private(set) var hasScanned = false
     private(set) var stats = Stats()
@@ -208,10 +227,18 @@ final class HiddenItemsStore {
 
         Permissions.shared.onChange = { [weak self] in self?.refresh(full: true, forceCapture: true) }
         MenuBarHider.shared.onLayoutChange = { [weak self] in self?.refresh(after: .milliseconds(400)) }
-        // 等分隔符就位再做首次全量扫描
+        // 等分隔符就位再做首次全量扫描。macOS 27 上这时被隐藏的图标已经收进「«」，要放出来扫
         MenuBarHider.shared.onReady = { [weak self] in
-            self?.settleCollector()
-            self?.refresh(full: true, forceCapture: true)
+            let settling = self?.settleCollector()
+            if MenuBarHider.hidesByOverflow {
+                // 两件事都要临时放出图标，一件做完再做另一件
+                Task { [weak self] in
+                    await settling?.value
+                    self?.revealAndScan(full: true, forceCapture: true)
+                }
+            } else {
+                self?.refresh(full: true, forceCapture: true)
+            }
         }
 
         let workspace = NSWorkspace.shared.notificationCenter
@@ -261,12 +288,29 @@ final class HiddenItemsStore {
 
     /// 收纳符要紧挨在开关左边：夹在中间的图标不会被收走，跑到开关右边会把开关也挤出屏幕。
     /// 系统记的位置数值不精确，放下去以后核对，不对就一点点挪（它和开关之间的图标都在屏幕上，位置是准的）
-    private func settleCollector() {
+    @discardableResult
+    private func settleCollector() -> Task<Void, Never>? {
         separatorSettling?.cancel()
-        guard showAllItems else { return }
+        guard showAllItems else { return nil }
         separatorSettling = Task { [scanner] in
+            // macOS 27：收纳符伸长后会和左边的图标一起收进「«」，位置读不准。放出来、让它以细线排好再核对，
+            // MenuBarHider 也趁这时记下它的右边缘，垫片从那里算
+            let hider = MenuBarHider.shared
+            let reveals = MenuBarHider.hidesByOverflow && !hider.isTemporarilyRevealed
+            if reveals { hider.beginTemporaryReveal() }
+            defer { if reveals { hider.endTemporaryReveal() } }
+            if MenuBarHider.hidesByOverflow {
+                // 图标都排出来以后再建收纳符，它才会按开关的位置插进去
+                try? await Task.sleep(for: .milliseconds(700))
+                guard !Task.isCancelled, self.showAllItems else { return }
+                hider.createCollectorIfNeeded()
+            }
             let own = MenuBarScanner.AppInfo(NSRunningApplication.current)
             var previous: [CGRect] = []
+            // macOS 27：收纳符首选位置的二分区间（数值越大越靠左）
+            var low: CGFloat = 0
+            var high: CGFloat?
+            var attempts = 0
             for _ in 0..<30 {
                 // 状态栏图标新建以后要过一会儿才排好：连续两次扫描位置一致才算数
                 try? await Task.sleep(for: .milliseconds(300))
@@ -287,12 +331,28 @@ final class HiddenItemsStore {
                 } else {
                     break
                 }
+                // macOS 27 只在新建时读首选位置，数值和像素对不上：换个数值删掉重建，二分找到紧挨开关的那一档
+                if MenuBarHider.hidesByOverflow {
+                    let current = hider.collectorPreferredPosition
+                    if delta > 0 { low = current } else { high = current }
+                    let next = high.map { (low + $0) / 2 } ?? current * 1.5 + 20
+                    guard attempts < 12, abs(next - current) >= 0.5 else {
+                        log.error("收纳符找不到紧挨开关的位置：收纳符 \(String(describing: collector), privacy: .public) 开关 \(String(describing: toggle), privacy: .public)")
+                        break
+                    }
+                    attempts += 1
+                    log.notice("收纳符没到位（\(Int(collector.minX)) / 开关 \(Int(toggle.minX))），首选位置 \(current) → \(next) 重建")
+                    hider.recreateCollector(at: next)
+                    previous = []
+                    continue
+                }
                 log.notice("收纳符没到位，再挪 \(Int(delta))")
                 MenuBarHider.shared.nudgeCollector(by: delta)
                 previous = []
             }
             self.refresh(after: .milliseconds(400))
         }
+        return separatorSettling
     }
 
     // MARK: - 刷新
@@ -348,9 +408,28 @@ final class HiddenItemsStore {
         let staleIDs = showAll && refreshVisibleIcons
             ? Set(icons.filter { Date().timeIntervalSince($0.value.capturedAt) > Self.maxVisibleIconAge }.keys)
             : []
+        let hider = MenuBarHider.shared
+        let lengthChange = hider.lastLengthChange
+        // 被隐藏的图标在菜单栏上、并且改完长度已经过了一会儿（辅助功能的位置跟上了）
+        let showedHidden = hider.showsHiddenItems && Date().timeIntervalSince(lengthChange) > 0.8
+        let showedAlwaysHidden = showedHidden && hider.showsAlwaysHiddenItems
+        let agentBars = MenuBarHider.hidesByOverflow ? StatusBarRows.agentBarWindows() : []
 
         refreshTask = Task { [scanner, capturer] in
             let result = await scanner.scan(adding: candidates, own: own, isFull: full)
+            if MenuBarHider.hidesByOverflow {
+                // 扫描期间长度又变了，位置不算数
+                let settled = hider.lastLengthChange == lengthChange
+                let layout = self.overflowLayout(result, positionsValid: settled && showedHidden,
+                                                 alwaysHiddenValid: settled && showedAlwaysHidden)
+                await self.finishRefresh(result: result, items: layout.items, hiddenIDs: layout.hidden,
+                                         beyondIDs: layout.beyond, capturable: layout.capturable, agentBars: agentBars,
+                                         canCapture: canCapture, force: force, method: method, islandRows: islandRows,
+                                         changedWallpapers: changedWallpapers, cachedWidths: cachedWidths,
+                                         clippedWidths: clippedWidths, showAll: showAll, editingLayout: editingLayout,
+                                         staleIDs: staleIDs)
+                return
+            }
             let snapshot = try? MenuBarSnapshot(mapping: result, knownWindows: self.itemWindows)
             if let snapshot {
                 self.itemWindows.merge(snapshot.itemWindows) { _, new in new }
@@ -399,6 +478,153 @@ final class HiddenItemsStore {
                 self.refresh(full: next.full, adding: next.extra)
             }
         }
+    }
+
+    /// macOS 27 的一轮刷新：截图、更新列表。和上面 macOS 26 的流程一样，只是截图从整条菜单栏的窗口里裁
+    private func finishRefresh(result: MenuBarScanner.Result, items: [MenuBarItem], hiddenIDs: Set<String>,
+                               beyondIDs: Set<String>, capturable: Set<String>, agentBars: [StatusBarRows.Window],
+                               canCapture: Bool, force: Bool, method: ItemImageCapturer.Method, islandRows: [CGFloat],
+                               changedWallpapers: [(row: Int, key: WallpaperTone.Key)], cachedWidths: [String: CGFloat],
+                               clippedWidths: [String: CGFloat], showAll: Bool, editingLayout: Bool,
+                               staleIDs: Set<String>) async {
+        let hidden = items.filter { hiddenIDs.contains($0.id) }
+        let toCapture = (editingLayout ? items : showAll ? items.filter(\.isMovable) : hidden)
+            .filter { capturable.contains($0.id) }
+        var requests: [ItemImageCapturer.Request] = []
+        if canCapture {
+            let recapture = staleIDs.subtracting(hiddenIDs)
+            requests = Self.iconRequests(toCapture, cachedWidths: cachedWidths, clippedWidths: clippedWidths,
+                                         force: force, recapture: recapture, agentBars: agentBars)
+            if force, let toggle = result.toggle, let bar = agentBars.first(where: { $0.frame.contains(toggle.center) }) {
+                requests.append(.init(key: "probe:\(Int(bar.frame.minY.rounded()))", windowID: bar.id,
+                                      windowFrame: bar.frame, crop: toggle,
+                                      region: Self.region(of: toggle, in: bar)))
+            }
+        }
+        if !requests.isEmpty {
+            apply(result: result, items: items, hiddenIDs: hiddenIDs, beyondIDs: beyondIDs,
+                  batch: ItemImageCapturer.Batch(), capturedAll: false)
+        }
+        let batch = await capturer.capture(requests, method: method)
+        let wallpaperStyles = await Self.estimate(changedWallpapers)
+        applyWallpapers(changedWallpapers, styles: wallpaperStyles)
+        apply(result: result, items: items, hiddenIDs: hiddenIDs, beyondIDs: beyondIDs, batch: batch,
+              capturedAll: force && canCapture)
+
+        refreshTask = nil
+        if let next = queued {
+            queued = nil
+            refresh(full: next.full, adding: next.extra)
+        }
+    }
+
+    /// macOS 27：把这一轮扫到的图标和记着的、收进了「«」的图标合起来，分出哪些藏着。
+    /// - Parameters:
+    ///   - positionsValid: 被隐藏的图标这时在菜单栏上、位置排好了：按分隔符左右重新分区，记下来
+    ///   - alwaysHiddenValid: 永远隐藏的图标也在菜单栏上，永远隐藏分隔符的位置也算数
+    /// - Returns: capturable 是此刻真的画在菜单栏上、可以截图的图标
+    private func overflowLayout(_ result: MenuBarScanner.Result, positionsValid: Bool, alwaysHiddenValid: Bool)
+        -> (items: [MenuBarItem], hidden: Set<String>, beyond: Set<String>, capturable: Set<String>) {
+        let present = Set(result.items.map(\.id))
+        // 分隔符这时得是细线：菜单栏太满、连它也收进了「«」时，AppKit 留着的是旧位置
+        let positionsValid = positionsValid && (result.separator.map { $0.width < 60 } ?? false)
+        if positionsValid, let separator = result.separator {
+            // 这时该在的都在：不在了的常显图标是 App 自己拿掉了
+            rememberedItems = rememberedItems.filter { present.contains($0.key) || knownHiddenIDs.contains($0.key) }
+            for item in result.items {
+                rememberedItems[item.id] = item
+                if item.frame.midX < separator.midX {
+                    knownHiddenIDs.insert(item.id)
+                    if alwaysHiddenValid, let alwaysHidden = result.alwaysHiddenSeparator {
+                        if item.frame.midX < alwaysHidden.midX {
+                            knownBeyondIDs.insert(item.id)
+                        } else {
+                            knownBeyondIDs.remove(item.id)
+                        }
+                    }
+                } else {
+                    knownHiddenIDs.remove(item.id)
+                    knownBeyondIDs.remove(item.id)
+                }
+            }
+        }
+        // App 退出了的不再记着
+        let running = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
+        rememberedItems = rememberedItems.filter { running.contains($0.value.pid) }
+        knownHiddenIDs = knownHiddenIDs.filter { present.contains($0) || rememberedItems[$0] != nil }
+        knownBeyondIDs.formIntersection(knownHiddenIDs)
+
+        // 收进「«」的：藏到岛上的；显示全部图标时还有收纳符收走的常显图标
+        let collecting = MenuBarHider.shared.collectsAll && !positionsValid
+        let missing = rememberedItems.values.filter {
+            !present.contains($0.id) && (knownHiddenIDs.contains($0.id) || collecting && $0.isMovable)
+        }
+        let items = (result.items + missing).sorted { $0.frame.minX < $1.frame.minX }
+        // 藏着的时候辅助功能可能还列着收进去的图标（位置是旧的），那里画的不是它
+        let capturable = positionsValid ? present
+            : present.filter { !knownHiddenIDs.contains($0) && !(collecting && rememberedItems[$0]?.isMovable == true) }
+        return (items, knownHiddenIDs, knownBeyondIDs, capturable)
+    }
+
+    /// macOS 27：把藏起来的图标临时放回菜单栏，扫一遍记下来（位置、截图），再藏回去。
+    /// 菜单栏会闪一下，只在必要时做：启动时、打开布局页、刚启动了可能有图标的 App
+    func revealAndScan(full: Bool = false, adding extra: [MenuBarScanner.AppInfo] = [], forceCapture: Bool = false) {
+        let hider = MenuBarHider.shared
+        guard MenuBarHider.hidesByOverflow, revealScanTask == nil, Permissions.shared.accessibility,
+              !isPaused, !hider.isTemporarilyRevealed
+        else {
+            // 已经露出来了（正在点隐藏的图标等）：直接扫就行
+            refresh(full: full, adding: extra, forceCapture: forceCapture)
+            return
+        }
+        revealScanTask = Task {
+            defer { revealScanTask = nil }
+            hider.beginTemporaryReveal(includingAlwaysHidden: true)
+            // 放出来以后约 150ms 排好，辅助功能的位置还要晚一些
+            try? await Task.sleep(for: .milliseconds(900))
+            refresh(full: full, adding: extra, forceCapture: forceCapture)
+            while let task = refreshTask { await task.value }
+            hider.endTemporaryReveal()
+        }
+    }
+
+    /// macOS 27：点岛上藏着的图标前先放出来，等它重新出现在辅助功能里（收进「«」时的元素已经失效了）
+    func waitUntilShown(_ id: String, timeout: Duration = .seconds(2)) async -> MenuBarItem? {
+        let own = MenuBarScanner.AppInfo(NSRunningApplication.current)
+        let hider = MenuBarHider.shared
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(100))
+            // 刚放出来时列着的可能还是收进去之前的旧元素
+            guard Date().timeIntervalSince(hider.lastLengthChange) > 0.3 else { continue }
+            let result = await scanner.scan(adding: [], own: own, isFull: false)
+            if let item = result.items.first(where: { $0.id == id }),
+               let frame = await scanner.frame(of: item.element), frame.width > 0 {
+                return item
+            }
+        }
+        return nil
+    }
+
+    /// macOS 27：替用户移动图标成功后记下它现在在哪一区。移动完立刻就藏回去了，扫不到它的新位置
+    func noteMoved(_ id: String, to section: MenuBarItemMover.Section) {
+        guard MenuBarHider.hidesByOverflow else { return }
+        switch section {
+        case .visible:
+            knownHiddenIDs.remove(id)
+            knownBeyondIDs.remove(id)
+        case .hidden, .alwaysHidden:
+            knownHiddenIDs.insert(id)
+            if section == .alwaysHidden { knownBeyondIDs.insert(id) } else { knownBeyondIDs.remove(id) }
+            if rememberedItems[id] == nil, let item = allItems.first(where: { $0.id == id })?.source {
+                rememberedItems[id] = item
+            }
+        }
+    }
+
+    /// 在整条菜单栏窗口里裁出某个图标的那一段：横向按图标，纵向整个窗口
+    private nonisolated static func region(of frame: CGRect, in bar: StatusBarRows.Window) -> CGRect {
+        CGRect(x: frame.minX, y: bar.frame.minY, width: frame.width, height: bar.frame.height)
     }
 
     private static var isScreenLocked: Bool {
@@ -450,8 +676,18 @@ final class HiddenItemsStore {
     /// 只截新出现的、宽度变了的、指定要重截的图标（强制时全截）
     private nonisolated static func iconRequests(_ items: [MenuBarItem], cachedWidths: [String: CGFloat],
                                                  clippedWidths: [String: CGFloat],
-                                                 force: Bool, recapture: Set<String>) -> [ItemImageCapturer.Request] {
+                                                 force: Bool, recapture: Set<String>,
+                                                 agentBars: [StatusBarRows.Window] = []) -> [ItemImageCapturer.Request] {
         items.compactMap { item in
+            // macOS 27：没有单个图标的窗口，从整条菜单栏的窗口里按位置裁
+            if item.windowID == nil, let bar = agentBars.first(where: { $0.frame.contains(item.frame.center) }) {
+                let width = item.frame.width
+                if !force, !recapture.contains(item.id),
+                   let cached = cachedWidths[item.id], abs(cached - width) < 0.5 { return nil }
+                if !force, let clipped = clippedWidths[item.id], abs(clipped - width) < 0.5 { return nil }
+                return .init(key: item.id, windowID: bar.id, windowFrame: bar.frame, crop: item.frame,
+                             region: region(of: item.frame, in: bar))
+            }
             guard let windowID = item.windowID, let windowFrame = item.windowFrame else { return nil }
             if !force, !recapture.contains(item.id),
                let width = cachedWidths[item.id], abs(width - windowFrame.width) < 0.5 { return nil }
@@ -494,16 +730,18 @@ final class HiddenItemsStore {
 
         var newItems: [Item] = []
         for source in items {
-            if batch.clipped.contains(source.id), let windowFrame = source.windowFrame {
-                clippedWidths[source.id] = windowFrame.width
+            // macOS 27 上没有单个图标的窗口，按图标本身的宽度记
+            let width = source.windowFrame?.width ?? source.frame.width
+            if batch.clipped.contains(source.id) {
+                clippedWidths[source.id] = width
             }
-            if let capture = captured[source.id], let windowFrame = source.windowFrame {
+            if let capture = captured[source.id] {
                 clippedWidths[source.id] = nil
                 // 像素没变就复用原来的对象，界面不会无谓刷新
                 let icon = icons[source.id].flatMap {
                     $0.icon.analysis.fingerprint == capture.analysis.fingerprint ? $0.icon : nil
                 } ?? IconImage(capture)
-                icons[source.id] = (windowFrame.width, icon, Date())
+                icons[source.id] = (width, icon, Date())
             }
             let isHidden = hiddenIDs.contains(source.id)
             let isBeyond = beyondIDs.contains(source.id)
@@ -519,8 +757,8 @@ final class HiddenItemsStore {
         }
         MenuBarHider.shared.hasAlwaysHiddenItems = newItems.contains(where: \.isAlwaysHidden)
 
-        // 已经不在菜单栏上的图标，丢掉缓存
-        let present = Set(result.items.map(\.id))
+        // 已经不在菜单栏上的图标，丢掉缓存（macOS 27 上收进「«」、还记着的不算）
+        let present = Set(items.map(\.id))
         icons = icons.filter { present.contains($0.key) }
         clippedWidths = clippedWidths.filter { present.contains($0.key) }
         if result.isFull {
@@ -599,6 +837,36 @@ final class HiddenItemsStore {
                 self?.refresh(adding: [info])
             }
         }
+        // macOS 27：图标落在隐藏区就直接收进「«」，辅助功能里看不到。
+        // 可能有菜单栏图标的 App 启动后，扫完还没见到它的图标，就放出来扫一遍。几个一起启动的合成一次
+        guard MenuBarHider.hidesByOverflow, app.bundleURL?.pathExtension == "app",
+              app.activationPolicy == .accessory || Self.hasPlacedStatusItems(app.bundleIdentifier)
+        else { return }
+        launchedApps[info.pid] = info
+        guard launchScan == nil else { return }
+        launchScan = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard let self else { return }
+            self.launchScan = nil
+            let known = Set(self.allItems.map(\.source.pid))
+            let running = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
+            let unseen = self.launchedApps.values.filter { !known.contains($0.pid) && running.contains($0.pid) }
+            self.launchedApps = [:]
+            if !unseen.isEmpty {
+                log.info("刚启动的 \(unseen.map(\.name), privacy: .public) 没看到图标，放出来扫一遍")
+                self.revealAndScan(adding: unseen)
+            }
+        }
+    }
+
+    /// 系统会在 App 的偏好设置里记下它的状态栏图标放在哪（"NSStatusItem Preferred Position …"）。
+    /// 有这样的键，说明它在菜单栏上放过图标。沙盒 App 的偏好设置在容器里，读不到，只能靠没有 Dock 图标来猜
+    private static func hasPlacedStatusItems(_ bundleID: String?) -> Bool {
+        guard let bundleID,
+              let keys = CFPreferencesCopyKeyList(bundleID as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+                as? [String]
+        else { return false }
+        return keys.contains { $0.hasPrefix("NSStatusItem") }
     }
 
     private func appTerminated(_ pid: pid_t) {
@@ -606,6 +874,8 @@ final class HiddenItemsStore {
         // App 重开后图标是新窗口
         let ids = Set(allItems.filter { $0.source.pid == pid }.map(\.id))
         itemWindows = itemWindows.filter { !ids.contains($0.key) }
+        rememberedItems = rememberedItems.filter { $0.value.pid != pid }
+        launchedApps[pid] = nil
         appIconCache[pid] = nil
         refresh()
     }

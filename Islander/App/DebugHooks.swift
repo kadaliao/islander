@@ -17,6 +17,7 @@ private let log = Logger(subsystem: "com.kadaliao.islander", category: "debug")
 ///     com.kadaliao.islander.debug.layout    打印当前菜单栏布局
 ///     com.kadaliao.islander.debug.diagnostics  object = 文件路径：把「拷贝诊断信息」的内容写到文件
 ///     com.kadaliao.islander.debug.showall   object = "on" / "off"：岛上显示全部图标
+///     com.kadaliao.islander.debug.reveal    object = "on" / "off"：临时把隐藏的图标（连永远隐藏的）放回菜单栏 / 收回去
 ///     com.kadaliao.islander.debug.windows   打印菜单栏图标窗口（编号、位置、标题）
 ///     com.kadaliao.islander.debug.chain     打印每个图标认的是哪个窗口（记着的 / 现在认的 / 合起来认的）
 ///     com.kadaliao.islander.debug.capture   object = 窗口编号：截一张，打印耗时和不透明像素数
@@ -50,6 +51,10 @@ enum DebugHooks {
             case "dark": .dark
             default: nil
             }
+        }
+        observe("reveal") { value in
+            if value == "on" { MenuBarHider.shared.beginTemporaryReveal(includingAlwaysHidden: true) }
+            else { MenuBarHider.shared.endTemporaryReveal() }
         }
         observe("pin") { value in
             ScreenManager.shared.isPinned = value == "on"

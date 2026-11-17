@@ -41,11 +41,29 @@ final class ClickForwarder {
         session = Task {
             await previous?.value
             defer { if generation == current { session = nil } }
+            var item = item
+            // macOS 27：藏着的图标收在「«」里，辅助功能元素已经失效（读不到菜单、按了没反应）。
+            // 先放回菜单栏，等它重新出现、拿到新的元素；菜单 / 弹窗关掉以后再藏回去
+            let hider = MenuBarHider.shared
+            var revealedFirst = false
+            if MenuBarHider.hidesByOverflow, isHidden, !hider.isTemporarilyRevealed {
+                hider.beginTemporaryReveal(includingAlwaysHidden: needsFullReveal)
+                revealedFirst = true
+                guard let shown = await HiddenItemsStore.shared.waitUntilShown(item.id) else {
+                    log.error("\(item.id, privacy: .public) 放出来以后还是找不到，放弃")
+                    hider.endTemporaryReveal()
+                    ScreenManager.shared.collapseAll()
+                    return
+                }
+                item = shown
+            }
+            defer { if revealedFirst { hider.endTemporaryReveal() } }
             if let view = model.hostView, let entries = await MenuMirror.read(item) {
                 await showMirror(entries, of: item, model: model, anchor: anchor, in: view)
             } else {
                 log.info("\(item.id, privacy: .public) 读不到菜单，改为在菜单栏里打开")
-                await openInMenuBar(item, reveal: isHidden, alwaysHidden: needsFullReveal, model: model, anchor: anchor)
+                await openInMenuBar(item, reveal: isHidden && !revealedFirst, alwaysHidden: needsFullReveal,
+                                    model: model, anchor: anchor)
             }
         }
     }

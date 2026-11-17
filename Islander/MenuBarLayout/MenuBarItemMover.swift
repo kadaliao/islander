@@ -102,6 +102,7 @@ final class MenuBarItemMover {
         do {
             try await performMove(itemID, to: destination)
             HiddenItemsStore.shared.setAlwaysHidden(itemID, destination.section == .alwaysHidden)
+            HiddenItemsStore.shared.noteMoved(itemID, to: destination.section)
             return true
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -457,10 +458,12 @@ final class MenuBarItemMover {
 
 extension MenuBarItem {
     /// 系统固定的图标：时钟、控制中心，以及用麦克风 / 摄像头时出现的隐私指示
+    /// （macOS 26 上归 Control Center，macOS 27 上归 MenuBarAgent）
     var isMovable: Bool {
-        !["com.apple.controlcenter|com.apple.menuextra.clock",
-          "com.apple.controlcenter|com.apple.menuextra.controlcenter",
-          "com.apple.controlcenter|com.apple.menuextra.audiovideo"].contains(id)
+        guard bundleID == "com.apple.controlcenter" || bundleID == "com.apple.MenuBarAgent" else { return true }
+        let identifier = id.split(separator: "|", maxSplits: 1).last.map(String.init) ?? ""
+        return !["com.apple.menuextra.clock", "com.apple.menuextra.controlcenter",
+                 "com.apple.menuextra.audiovideo"].contains(identifier)
     }
 }
 
