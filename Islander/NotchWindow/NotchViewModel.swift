@@ -93,7 +93,7 @@ final class NotchViewModel {
     }
 
     var layout: NotchLayout {
-        let maxRowWidth = min(geometry.screenFrame.width - 240, 720)
+        let maxRowWidth = min(geometry.screenFrame.width - 240, NotchLayout.maxRowWidth)
         let widths: [CGFloat]
         var minimumWidth: CGFloat = 0
         switch content {
@@ -132,13 +132,12 @@ final class NotchViewModel {
 }
 
 extension HiddenItemsStore.Item {
-    /// 在岛上的显示尺寸：原尺寸显示，比行高还高的等比缩到行高
+    /// 在岛上的显示尺寸：原尺寸显示，比行高还高的等比缩到行高，比一行还宽的等比缩到一行宽。
+    /// 宽度不设上限的话，一张超宽的截图就能把岛撑得比屏幕还宽（#6）
     @MainActor var displaySize: CGSize {
         let size = self.size
-        guard size.height > NotchLayout.iconSize, size.height > 0 else {
-            return CGSize(width: max(size.width, 20), height: size.height)
-        }
-        let scale = NotchLayout.iconSize / size.height
-        return CGSize(width: max(size.width * scale, 20), height: NotchLayout.iconSize)
+        guard size.width > 0, size.height > 0 else { return CGSize(width: max(size.width, 20), height: size.height) }
+        let scale = min(NotchLayout.iconSize / size.height, NotchLayout.maxRowWidth / size.width, 1)
+        return CGSize(width: max(size.width * scale, 20), height: size.height * scale)
     }
 }

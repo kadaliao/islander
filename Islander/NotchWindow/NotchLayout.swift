@@ -8,6 +8,8 @@ struct NotchLayout: Equatable {
     static let dividerWidth: CGFloat = 9
     static let rowSpacing: CGFloat = 8
     static let contentPadding: CGFloat = 20
+    /// 一行最宽多少；单个图标也不超过它
+    static let maxRowWidth: CGFloat = 720
     /// 画布给弹簧回弹留的余量：外形冲过头时不能被窗口边缘裁掉
     static let overshootMargin: CGFloat = 40
 
