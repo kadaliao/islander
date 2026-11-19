@@ -46,9 +46,23 @@ final class ItemImageCapturer: @unchecked Sendable {
         var clipped: Set<String> = []
     }
 
+    /// 比这还宽的不是图标，是 Hidden Bar 这类工具伸长的分隔符（和 StatusBarRows 里 < 1000 的过滤一致）
+    static let maxItemWidth: CGFloat = 1000
+
     @concurrent
     func capture(_ requests: [Request], method: Method) async -> Batch {
         guard !requests.isEmpty else { return Batch() }
+        var batch = Batch()
+        // 照原宽截出来会把岛撑得比屏幕还宽（#6）；按挤窄处理，宽度不变就不再重截
+        let requests = requests.filter { request in
+            let width = max(request.crop?.width ?? 0, (request.region ?? request.windowFrame).width)
+            guard width >= Self.maxItemWidth else { return true }
+            batch.clipped.insert(request.key)
+            return false
+        }
+        if !batch.clipped.isEmpty {
+            log.info("超宽的不是图标，不截：\(batch.clipped.sorted(), privacy: .public)")
+        }
         var raw: [String: CGImage] = [:]
         switch method {
         case .automatic:
@@ -59,7 +73,6 @@ final class ItemImageCapturer: @unchecked Sendable {
             raw = await captureWithScreenCaptureKit(requests)
         }
 
-        var batch = Batch()
         for var request in requests {
             guard var image = raw[request.key] else { continue }
             if let region = request.region {
