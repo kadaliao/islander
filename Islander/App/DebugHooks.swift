@@ -7,7 +7,7 @@ private let log = Logger(subsystem: "com.kadaliao.islander", category: "debug")
 
 /// 仅调试构建：从终端用分布式通知驱动岛民，做自动化测试。
 ///
-///     com.kadaliao.islander.debug.open      object = 图标 id 的一部分（如 "Alfred"）：模拟点击岛上的这个图标
+///     com.kadaliao.islander.debug.open      object = 图标 id 的一部分（如 "Alfred"），前面加 "right:" 是右键：模拟点击岛上的这个图标
 ///     com.kadaliao.islander.debug.style     object = "light" / "dark" / "auto"：强制配色
 ///     com.kadaliao.islander.debug.pin       object = "on" / "off"：展开并锁定岛
 ///     com.kadaliao.islander.debug.snapshot  object = PNG 路径[@高度]：把岛所在区域截图存下来
@@ -27,22 +27,21 @@ private let log = Logger(subsystem: "com.kadaliao.islander", category: "debug")
 enum DebugHooks {
     @MainActor
     static func install() {
-        observe("open") { query in
+        observe("open") { value in
+            let button: ClickForwarder.Button = value.hasPrefix("right:") ? .right : .left
+            let query = value.hasPrefix("right:") ? String(value.dropFirst(6)) : value
             guard let item = HiddenItemsStore.shared.items.first(where: { $0.id.localizedCaseInsensitiveContains(query) }),
-                  let controller = ScreenManager.shared.controllers.first,
-                  let view = controller.model.hostView
+                  let controller = ScreenManager.shared.controllers.first, controller.model.hostView != nil
             else {
                 log.error("调试点击：没找到 \(query, privacy: .public)")
                 return
             }
             log.info("调试点击：\(item.id, privacy: .public)")
             controller.expand()
-            // 锚点：岛内容区正中的一个图标位置
-            let layout = controller.model.layout
-            let anchor = CGRect(x: view.bounds.midX - 14, y: layout.notchSize.height + 10, width: 28, height: 28)
             Task {
+                // 等图标排好、位置报上来
                 try? await Task.sleep(for: .milliseconds(500))
-                ClickForwarder.shared.open(item.source, isHidden: item.isHidden, from: controller.model, anchor: anchor)
+                controller.model.open(item, button: button)
             }
         }
         observe("style") { value in

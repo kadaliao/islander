@@ -27,6 +27,7 @@ final class NotchWindowController {
         // 不让 SwiftUI 根据内容改窗口尺寸：窗口固定，动画只在画布内发生
         hostingView.sizingOptions = []
         panel.contentView = hostingView
+        hostingView.model = model
         model.hostView = hostingView
         model.onMenuClosed = { [weak self] choseItem in self?.menuClosed(choseItem: choseItem) }
 
@@ -122,6 +123,18 @@ final class NotchWindowController {
             }
         }
         refreshInteractivity()
+        updateHover(at: point)
+    }
+
+    /// 悬停高亮跟着指针走（见 NotchViewModel.hoveredItemID）
+    private func updateHover(at point: NSPoint) {
+        guard model.isExpanded, pointerInside else {
+            model.setHovered(nil)
+            return
+        }
+        // 屏幕坐标（原点在左下）换成岛窗口里的 SwiftUI 全局坐标（原点在左上）
+        let frame = panel.frame
+        model.setHovered(model.itemID(at: CGPoint(x: point.x - frame.minX, y: frame.maxY - point.y)))
     }
 
     /// 停留够久才展开，路过不触发
@@ -198,8 +211,10 @@ final class NotchWindowController {
 
     /// 展开 / 收起后热区变了，按当前指针位置重新判断
     private func syncPointer() {
-        pointerInside = hotZone.contains(NSEvent.mouseLocation)
+        let point = NSEvent.mouseLocation
+        pointerInside = hotZone.contains(point)
         refreshInteractivity()
+        updateHover(at: point)
     }
 
     /// 只有展开且指针在岛上时才接收点击，其余时间点击穿透到下面的菜单栏

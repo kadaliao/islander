@@ -33,7 +33,44 @@ final class NotchPanel: NSPanel {
     }
 }
 
-/// 第一次点击就响应（面板不激活 App，默认第一次点击会被当成"激活窗口"吞掉）
+/// 第一次点击就响应（面板不激活 App，默认第一次点击会被当成"激活窗口"吞掉）。
+/// 右键也在这里接：SwiftUI 的按钮只管左键，右键要送给真实图标（#8 的 QQ 右键菜单）
 final class NotchHostingView<Content: View>: NSHostingView<Content> {
+    weak var model: NotchViewModel?
+
+    /// 正按着的右键：按下时指针下的图标，松开时还在它上面才算点了它
+    private var secondaryID: String?
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if !beginSecondaryClick(event) { super.rightMouseDown(with: event) }
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        if !endSecondaryClick(event) { super.rightMouseUp(with: event) }
+    }
+
+    private func item(under event: NSEvent) -> HiddenItemsStore.Item? {
+        let point = convert(event.locationInWindow, from: nil)
+        return model?.item(at: isFlipped ? point : CGPoint(x: point.x, y: bounds.height - point.y))
+    }
+
+    private func beginSecondaryClick(_ event: NSEvent) -> Bool {
+        guard let item = item(under: event) else { return false }
+        secondaryID = item.id
+        model?.setPressed(item.id)
+        return true
+    }
+
+    /// - Returns: 是不是这次右键的松开（是的话事件就不再交给 SwiftUI）
+    private func endSecondaryClick(_ event: NSEvent) -> Bool {
+        guard let pressed = secondaryID else { return false }
+        secondaryID = nil
+        model?.setPressed(nil)
+        if let model, let item = item(under: event), item.id == pressed {
+            model.open(item, button: .right)
+        }
+        return true
+    }
 }

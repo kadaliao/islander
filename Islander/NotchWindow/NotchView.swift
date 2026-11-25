@@ -101,14 +101,13 @@ private struct IslandItemButton: View {
     let item: HiddenItemsStore.Item
     let style: IslandStyle
     let model: NotchViewModel
-    /// 图标在岛窗口里的位置，镜像菜单弹在它正下方
-    @State private var frame: CGRect = .zero
 
     var body: some View {
         let size = item.displaySize
+        // 右键在 NotchHostingView 里接；按住 ⌃ 点照样走到这里（SwiftUI 的按钮在 mouseDown 之前就拿到了事件），当右键处理
         Button {
-            ClickForwarder.shared.open(item.source, isHidden: item.isHidden,
-                                       needsFullReveal: item.isBeyondAlwaysHiddenSeparator, from: model, anchor: frame)
+            let flags = NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags
+            model.open(item, button: flags.contains(.control) ? .right : .left)
         } label: {
             if let icon = item.icon {
                 Image(nsImage: icon.image(for: style))
@@ -122,9 +121,12 @@ private struct IslandItemButton: View {
             }
         }
         .buttonStyle(IslandIconButtonStyle(width: size.width, style: style,
-                                           isActive: model.openMenuItemID == item.id))
+                                           isActive: model.openMenuItemID == item.id,
+                                           isPressed: model.pressedItemID == item.id,
+                                           isHovered: model.hoveredItemID == item.id))
         .help(item.source.displayName)
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame = $0 }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.itemFrames[item.id] = $0 }
+        .onDisappear { model.itemFrames[item.id] = nil }
     }
 }
 
@@ -200,9 +202,14 @@ struct IslandIconButtonStyle: ButtonStyle {
     var style: IslandStyle = .dark
     /// 它的菜单正开着
     var isActive = false
+    /// 右键（或按住 ⌃ 点）正按着：SwiftUI 的按钮只管左键
+    var isPressed = false
+    /// 指针在它上面。nil：自己用 onHover 判断（调试面板的占位图标）
+    var isHovered: Bool? = nil
 
     func makeBody(configuration: Configuration) -> some View {
-        IslandIconButton(configuration: configuration, width: width, style: style, isActive: isActive)
+        IslandIconButton(configuration: configuration, width: width, style: style, isActive: isActive,
+                         isPressed: isPressed, isHovered: isHovered)
     }
 }
 
@@ -211,23 +218,27 @@ private struct IslandIconButton: View {
     let width: CGFloat
     let style: IslandStyle
     let isActive: Bool
+    let isPressed: Bool
+    let isHovered: Bool?
     @State private var hovering = false
 
     var body: some View {
         let ink: Color = style == .light ? .black : .white
         let strength = style == .light ? 0.6 : 1.0
-        let level = configuration.isPressed || isActive ? 0.24 : hovering ? 0.12 : 0
+        let hovered = isHovered ?? hovering
+        let pressed = configuration.isPressed || isPressed
+        let level = pressed || isActive ? 0.24 : hovered ? 0.12 : 0
         configuration.label
             .frame(width: width, height: NotchLayout.iconSize)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(ink.opacity(level * strength))
             )
-            .scaleEffect(configuration.isPressed ? 0.88 : 1)
-            .animation(.spring(response: 0.22, dampingFraction: 0.7), value: configuration.isPressed)
-            .animation(.easeOut(duration: 0.12), value: hovering)
+            .scaleEffect(pressed ? 0.88 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.7), value: pressed)
+            .animation(.easeOut(duration: 0.12), value: hovered)
             .contentShape(Rectangle())
-            .onHover { hovering = $0 }
+            .onHover { if isHovered == nil { hovering = $0 } }
     }
 }
 

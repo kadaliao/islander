@@ -40,6 +40,14 @@ final class NotchViewModel {
     private(set) var showsContent = false
     /// 正在弹出镜像菜单的那个图标：岛保持展开，图标保持高亮
     private(set) var openMenuItemID: String?
+    /// 指针下面的图标（悬停高亮）。由窗口控制器按全局鼠标位置算，和岛的展开 / 收起用同一路鼠标事件：
+    /// 不用 SwiftUI 的 onHover——岛所在的面板不激活，悬停靠系统的跟踪区域，菜单开着时、别的 App 接过鼠标时
+    /// 进出事件会丢，高亮会停在原来的图标上（#8）
+    private(set) var hoveredItemID: String?
+    /// 右键（或按住 ⌃ 点）按下、还没松开的图标：和左键按下一样缩一下
+    private(set) var pressedItemID: String?
+    /// 每个图标在岛窗口里的位置（SwiftUI 全局坐标，原点在左上）：判断指针、右键落在哪个图标上，镜像菜单也弹在它下面
+    @ObservationIgnored var itemFrames: [String: CGRect] = [:]
     /// 按住 ⌥ 打开的岛：连永远隐藏的图标也显示
     var showsAlwaysHidden = false
 
@@ -55,6 +63,33 @@ final class NotchViewModel {
     func menuDidClose(choseItem: Bool) {
         openMenuItemID = nil
         onMenuClosed?(choseItem)
+    }
+
+    func setHovered(_ id: String?) {
+        if hoveredItemID != id { hoveredItemID = id }
+    }
+
+    func setPressed(_ id: String?) {
+        if pressedItemID != id { pressedItemID = id }
+    }
+
+    /// 岛上某一点（SwiftUI 全局坐标）落在哪个图标上。指针每动一下都要问，先只查位置
+    func itemID(at point: CGPoint) -> String? {
+        guard isExpanded else { return nil }
+        return itemFrames.first { $0.value.contains(point) }?.key
+    }
+
+    func item(at point: CGPoint) -> HiddenItemsStore.Item? {
+        guard let id = itemID(at: point), case .items(let entries) = content else { return nil }
+        for case .item(let item) in entries where item.id == id { return item }
+        return nil
+    }
+
+    /// 点了岛上的图标
+    func open(_ item: HiddenItemsStore.Item, button: ClickForwarder.Button) {
+        ClickForwarder.shared.open(item.source, button: button, isHidden: item.isHidden,
+                                   needsFullReveal: item.isBeyondAlwaysHiddenSeparator, from: self,
+                                   anchor: itemFrames[item.id] ?? .zero)
     }
 
     init(geometry: NotchGeometry) {
@@ -124,6 +159,8 @@ final class NotchViewModel {
 
     func collapse() {
         guard isExpanded else { return }
+        setHovered(nil)
+        setPressed(nil)
         showsContent = false
         withAnimation(tuning.collapseAnimation) {
             isExpanded = false
