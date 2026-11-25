@@ -68,29 +68,55 @@ enum MenuMirror {
         AXUIElementSetMessagingTimeout(ref.element, 1.0)
         return AXUIElementPerformAction(ref.element, kAXPressAction as CFString)
     }
+
+    /// 关掉图标下正开着的菜单（右键临时弹出来的那种）。返回 false 表示没有开着的菜单
+    @concurrent
+    static func cancel(_ item: MenuBarItem) async -> Bool {
+        let element = item.element.element
+        AXUIElementSetMessagingTimeout(element, 0.5)
+        guard let menu = AX.elements(element, kAXChildrenAttribute)
+            .first(where: { AX.string($0, kAXRoleAttribute) == kAXMenuRole })
+        else { return false }
+        AXUIElementPerformAction(menu, kAXCancelAction as CFString)
+        return true
+    }
+
+    /// 按标题一层层找：路径是从最外层到这一项的标题
+    static func find(_ path: [String], in items: [MirroredMenuItem]) -> MirroredMenuItem? {
+        guard let first = path.first, let match = items.first(where: { !$0.isSeparator && $0.title == first }) else {
+            return nil
+        }
+        return path.count == 1 ? match : find(Array(path.dropFirst()), in: match.submenu)
+    }
+}
+
+/// 在镜像菜单里选中的一项：真实菜单里对应的元素，和从最外层到它的标题（真实菜单关掉又重开后元素失效，按标题再找）
+struct MirrorChoice {
+    let element: AXRef
+    let path: [String]
 }
 
 /// 把镜像菜单画成 NSMenu，弹在指定位置，返回用户选中的那一项
 @MainActor
 final class MirrorMenuPresenter: NSObject {
     private final class Box: NSObject {
-        let ref: AXRef
-        init(_ ref: AXRef) { self.ref = ref }
+        let choice: MirrorChoice
+        init(_ choice: MirrorChoice) { self.choice = choice }
     }
 
-    private var chosen: AXRef?
+    private var chosen: MirrorChoice?
 
     /// 弹出菜单并等它关闭（NSMenu 的弹出是模态的，期间主线程在菜单的事件循环里）
     /// - Parameter point: 菜单左上角，`view` 的坐标系
-    func popUp(_ items: [MirroredMenuItem], at point: NSPoint, in view: NSView, style: IslandStyle) -> AXRef? {
+    func popUp(_ items: [MirroredMenuItem], at point: NSPoint, in view: NSView, style: IslandStyle) -> MirrorChoice? {
         chosen = nil
-        let menu = makeMenu(items)
+        let menu = makeMenu(items, path: [])
         menu.appearance = NSAppearance(named: style == .light ? .aqua : .darkAqua)
         menu.popUp(positioning: nil, at: point, in: view)
         return chosen
     }
 
-    private func makeMenu(_ items: [MirroredMenuItem]) -> NSMenu {
+    private func makeMenu(_ items: [MirroredMenuItem], path: [String]) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
         for item in items {
@@ -108,9 +134,9 @@ final class MirrorMenuPresenter: NSObject {
             entry.target = self
             entry.isEnabled = item.isEnabled
             entry.state = item.isChecked ? .on : .off
-            entry.representedObject = Box(item.element)
+            entry.representedObject = Box(MirrorChoice(element: item.element, path: path + [item.title]))
             if !item.submenu.isEmpty {
-                entry.submenu = makeMenu(item.submenu)
+                entry.submenu = makeMenu(item.submenu, path: path + [item.title])
             }
             menu.addItem(entry)
         }
@@ -121,7 +147,7 @@ final class MirrorMenuPresenter: NSObject {
     }
 
     @objc private func choose(_ sender: NSMenuItem) {
-        chosen = (sender.representedObject as? Box)?.ref
+        chosen = (sender.representedObject as? Box)?.choice
         log.info("选中镜像菜单项「\(sender.title, privacy: .public)」")
     }
 
